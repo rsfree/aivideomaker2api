@@ -467,6 +467,29 @@ make probe-run  # 零成本自检
 提交重试边界（**审核/读超时不重试**）、闸门容量与额度上调、任务表跨重启、媒体出口脱敏、
 面板 CSP 与登录流程。
 
+## 发版
+
+纯自动：**push 到 `main` 即发一个 patch 版本**，无需人工打 tag。
+
+```bash
+git push origin main      # ⇒ 读最新 tag、patch+1 ⇒ 多架构镜像 ⇒ tag ⇒ Release
+```
+
+流水线（`.github/workflows/release.yml`）顺序是**先推镜像、后打 tag**，构建失败不会留下
+「有 tag、没镜像」的半成品：
+
+1. `resolve` 算出版本号与 changelog（`[skip release]` 命中则整条跳过）
+2. `test` 跑 `go vet` + `go test`
+3. `image` 构建 `linux/amd64,linux/arm64` 并推 GHCR，三个 tag 同 digest：
+   `<version>` / `latest` / `sha-<短SHA>`
+4. `release` 打 annotated tag、建 GitHub Release
+
+约束与逃生阀：
+
+- 版本号**只递增 patch**；需要 minor/major 时人工打 tag 即可作为新基线
+- 提交信息含 `[skip release]`（整条 message 匹配）⇒ 不发版
+- 同一个提交重跑（`gh run rerun <id>`）会**沿用已有 tag**，不会二次自增
+
 ## 许可
 
 内部使用；上游接口的所有权与使用条款归 aivideomaker.ai。
