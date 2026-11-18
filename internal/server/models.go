@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
 )
 
 // modelInfo 是 `/v1/models` 里的一条。

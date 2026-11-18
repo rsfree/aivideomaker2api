@@ -30,8 +30,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
 )
 
 // HeaderName 是渠道选项头的规范写法（HTTP 头名大小写不敏感）。

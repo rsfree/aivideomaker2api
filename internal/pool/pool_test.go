@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/upstream"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 func newTestPool(t *testing.T, dir string, names ...string) *Pool {

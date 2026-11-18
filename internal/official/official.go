@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
 )
 
 // Config 是官方通路的配置。

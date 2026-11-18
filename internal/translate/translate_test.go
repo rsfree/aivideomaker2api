@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
 )
 
 func textBody(model string) map[string]any {

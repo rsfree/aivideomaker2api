@@ -12,15 +12,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
-	"github.com/jushenzhidao/aivideomaker2api/internal/media"
-	"github.com/jushenzhidao/aivideomaker2api/internal/openaivideos"
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/slots"
-	"github.com/jushenzhidao/aivideomaker2api/internal/sniff"
-	"github.com/jushenzhidao/aivideomaker2api/internal/store"
-	"github.com/jushenzhidao/aivideomaker2api/internal/translate"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/media"
+	"github.com/rsfree/aivideomaker2api/internal/openaivideos"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/slots"
+	"github.com/rsfree/aivideomaker2api/internal/sniff"
+	"github.com/rsfree/aivideomaker2api/internal/store"
+	"github.com/rsfree/aivideomaker2api/internal/translate"
 )
 
 const (

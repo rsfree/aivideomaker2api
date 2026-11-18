@@ -43,10 +43,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
-	"github.com/jushenzhidao/aivideomaker2api/internal/sniff"
-	"github.com/jushenzhidao/aivideomaker2api/internal/translate"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/sniff"
+	"github.com/rsfree/aivideomaker2api/internal/translate"
 )
 
 // Path 是本面的基础路径。

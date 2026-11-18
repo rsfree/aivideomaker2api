@@ -30,11 +30,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
-	"github.com/jushenzhidao/aivideomaker2api/internal/official"
-	"github.com/jushenzhidao/aivideomaker2api/internal/ratio"
-	"github.com/jushenzhidao/aivideomaker2api/internal/slots"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/official"
+	"github.com/rsfree/aivideomaker2api/internal/ratio"
+	"github.com/rsfree/aivideomaker2api/internal/slots"
 )
 
 func paramErr(msg, param string) error { return apierr.Param(msg, param) }

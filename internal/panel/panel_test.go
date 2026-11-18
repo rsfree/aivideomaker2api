@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/store"
-	"github.com/jushenzhidao/aivideomaker2api/internal/upstream"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/store"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 func newPanel(t *testing.T, password string) (http.Handler, *store.Store) {

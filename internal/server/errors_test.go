@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
 )
 
 // 读超时**不能**建议"重试一下"：上游可能已经把任务建起来了。

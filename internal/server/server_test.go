@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/media"
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/store"
-	"github.com/jushenzhidao/aivideomaker2api/internal/upstream"
+	"github.com/rsfree/aivideomaker2api/internal/media"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/store"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 // fakeSite 是站点替身：只实现本服务真正调用的 procedure。

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
 )
 
 // fakeSite 是一个**完全离线**的站点替身：只实现本服务真正调用的那几个 procedure。

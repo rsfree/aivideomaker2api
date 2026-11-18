@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/translate"
-	"github.com/jushenzhidao/aivideomaker2api/internal/upstream"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/translate"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 // 对外错误码白名单。

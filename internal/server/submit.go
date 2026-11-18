@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/debughist"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/store"
-	"github.com/jushenzhidao/aivideomaker2api/internal/translate"
-	"github.com/jushenzhidao/aivideomaker2api/internal/upstream"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/debughist"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/store"
+	"github.com/rsfree/aivideomaker2api/internal/translate"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 // contentRejectionQuotes 是内容审核的**上游原话**（随响应透传）。

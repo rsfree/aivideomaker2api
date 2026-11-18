@@ -25,7 +25,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
 )
 
 // 站点约定。

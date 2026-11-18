@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/cookie"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
-	"github.com/jushenzhidao/aivideomaker2api/internal/sniff"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/cookie"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/sniff"
 )
 
 // Terminal 是站点侧的终态词表。

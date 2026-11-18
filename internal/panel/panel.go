@@ -30,9 +30,9 @@ import (
 
 	_ "embed"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/debughist"
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/store"
+	"github.com/rsfree/aivideomaker2api/internal/debughist"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/store"
 )
 
 //go:embed index.html

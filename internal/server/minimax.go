@@ -7,13 +7,13 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jushenzhidao/aivideomaker2api/internal/apierr"
-	"github.com/jushenzhidao/aivideomaker2api/internal/jsonx"
-	"github.com/jushenzhidao/aivideomaker2api/internal/pool"
-	"github.com/jushenzhidao/aivideomaker2api/internal/ratio"
-	"github.com/jushenzhidao/aivideomaker2api/internal/store"
-	"github.com/jushenzhidao/aivideomaker2api/internal/translate"
-	"github.com/jushenzhidao/aivideomaker2api/internal/upstream"
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/jsonx"
+	"github.com/rsfree/aivideomaker2api/internal/pool"
+	"github.com/rsfree/aivideomaker2api/internal/ratio"
+	"github.com/rsfree/aivideomaker2api/internal/store"
+	"github.com/rsfree/aivideomaker2api/internal/translate"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 // MiniMax 官方视频生成协议面。
