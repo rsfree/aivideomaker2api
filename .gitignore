@@ -1,0 +1,24 @@
+# 运行期数据（任务库、账号状态、上传缓存）
+data/
+auths/
+*.db
+*.db-shm
+*.db-wal
+
+# 本地配置（含凭据，绝不入库）
+config.json
+.env
+
+# 构建产物
+/bin/
+/server
+aivideomaker2api
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 本地会话记忆（含账号与运维细节，绝不入库）
+.workbuddy/

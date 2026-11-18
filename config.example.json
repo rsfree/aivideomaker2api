@@ -1,0 +1,71 @@
+{
+  "_comment": "aivideomaker2api 配置。启动时若 config.json 不存在会自动生成一份推荐配置。敏感值（api_key / minter key / 面板口令）建议只走环境变量：AVM2_API_KEY / AVM_MINTER_KEY / AVM2_PANEL_PASSWORD。",
+  "listen": ":8808",
+  "api_key": "",
+  "base_url": "https://aivideomaker.ai",
+  "_comment_public_base": "成片出口基址。填了才会把上游直链换成本服务地址（{public_base}/v/{id}.mp4），读不出任何上游信息；留空 = 原样透传上游链接（与旧行为逐字节一致）。",
+  "public_base": "",
+  "media_path": "/v",
+  "auth_dir": "./auths",
+  "state_file": "./data/state.json",
+  "task_store": {
+    "_comment": "path 留空 = 纯内存（**显式**的开发开关，不是持久化失败后的隐式兜底）。retention_days 到期会做一次紧凑重写。cache_ttl 是 GET /tasks/{id} 的上游视图缓存：任务出片要 ~60s，调用方按秒轮询时靠它挡 429；0 = 关闭缓存。",
+    "path": "./data/tasks.jsonl",
+    "retention_days": 7,
+    "cache_ttl": "15s"
+  },
+  "server": {
+    "_comment": "write_timeout 默认 0：成片下载是流式的，固定总时长会变成「文件越大越容易失败」。",
+    "read_timeout": "300s",
+    "write_timeout": "0s"
+  },
+  "submit": {
+    "_comment": "受理/推进分离：POST 毫秒级返回 id，转存/等槽位/create 在后台做。lease 是「判定推进 goroutine 已死」的时限（要大于 转存 120s + 等槽位 600s + 铸 token 45s 的和）。retries 只对「上游确定没接单」的失败生效（queue is full / 429 闸门 / 连接类错误）—— 这条线没有幂等键，重发可能重复建任务。inline 只给测试用，生产误开等于关掉「受理即返」。",
+    "workers": 32,
+    "lease": "1200s",
+    "retries": 2,
+    "retry_backoff": "3s",
+    "inline": false
+  },
+  "queue": {
+    "_comment": "max_in_flight = 0 表示按账号额度自动（读 ai.queryUserPermission.maxQueueLength：premium 2 / pro 4，读不到回落 2）。想要「每号打满」就保持 0 并让一个号只被一个实例使用。acquire_timeout 是等空槽的总预算；watch_timeout 是盯到终态的时限。",
+    "max_in_flight": 0,
+    "acquire_timeout": "600s",
+    "poll_interval": "10s",
+    "watch_timeout": "3600s"
+  },
+  "upstream": {
+    "_comment": "timeout 是 tRPC 单次调用超时（含 create，上游排队时可能要一分钟以上）。media_fetch_timeout 是取单个参考文件的预算；media_rehost_budget 是**整个转存阶段**的总预算（一次创建最多 7 个媒体项）。trust_env=false 时忽略 HTTP_PROXY（对回环上游自测必须关，否则请求会被代理拐走）。",
+    "timeout": "120s",
+    "probe_timeout": "8s",
+    "trust_env": true,
+    "user_id": "",
+    "visitor_id": "",
+    "media_fetch_timeout": "30s",
+    "media_rehost_budget": "120s",
+    "media_retries": 2,
+    "rehost_workers": 7,
+    "captcha_probe_ttl": "5s",
+    "media_read_timeout": "60s"
+  },
+  "minter": {
+    "_comment": "Turnstile 铸造服务（可复用的常驻服务）。留空 = 不启用：闸门翻起时如实返回 429，等它衰减。url 支持逗号分隔多个地址（轮询 + 故障转移）。",
+    "url": "",
+    "key": "",
+    "timeout": "25s",
+    "retries": 1,
+    "reserve": 8
+  },
+  "pool": {
+    "_comment": "账号健康度（余额 / 套餐 / 闸门）的周期采样。只读探测，不创建任务。0 = 关闭。",
+    "probe_interval": "300s"
+  },
+  "panel": {
+    "_comment": "内置面板（/panel）。password 留空时回落到 api_key；两者都空 = 不校验（仅本机自用，启动会告警）。",
+    "enabled": true,
+    "password": ""
+  },
+  "logging": {
+    "level": "info"
+  }
+}

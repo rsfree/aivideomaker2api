@@ -1,0 +1,36 @@
+services:
+  avm2api:
+    image: ${AVM2API_IMAGE:-ghcr.io/rsfree/aivideomaker2api:latest}
+    container_name: avm2api
+    restart: unless-stopped
+    ports:
+      - "${AVM2_HOST_PORT:-8808}:8808"
+    volumes:
+      # 配置（含公开参数）只读挂载；凭据与数据走可写卷。
+      - ./config.json:/app/config.json:ro
+      - ./auths:/app/auths
+      - ./data:/app/data
+    environment:
+      # 敏感项走环境变量，不进配置文件、不进镜像。
+      - AVM2_API_KEY=${AVM2_API_KEY:-}
+      - AVM2_PANEL_PASSWORD=${AVM2_PANEL_PASSWORD:-}
+      # 对外可访问的本服务地址；填了才会把成片直链换成本服务地址。
+      - AVM2_PUBLIC_BASE=${AVM2_PUBLIC_BASE:-}
+      # Turnstile 铸造服务。走 host 网络部署时用 host.docker.internal（compose 会自动加
+      # host-gateway 映射）；留空 = 不启用，闸门翻起时如实 429。
+      - AVM_MINTER_URL=${AVM_MINTER_URL:-}
+      - AVM_MINTER_KEY=${AVM_MINTER_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 接待能力的真天花板是 fd，不是 worker 数：容器默认 ulimit -n=1024，
+    # 放开后单进程实测能稳定承接数千并发（goroutine 阻塞等待槽位不占 OS 线程）。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

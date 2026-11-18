@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aivideomaker2api · 控制台</title>
+<link rel="stylesheet" href="/panel/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="healthDot" aria-hidden="true"></span>
+    <strong>aivideomaker2api</strong>
+    <span class="muted" id="version">—</span>
+  </div>
+  <div class="topbar-meta">
+    <span class="muted" id="metaAuth">—</span>
+    <span class="muted" id="metaUptime">—</span>
+    <button class="btn ghost" id="refreshBtn" type="button">刷新</button>
+    <button class="btn ghost hidden" id="logoutBtn" type="button">退出</button>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="sidenav" id="sidenav">
+  <div class="nav-brand">
+    <span class="dot" id="healthDot2" aria-hidden="true"></span>
+    <div>
+      <div class="nav-name">aivideomaker2api</div>
+      <div class="nav-sub">控制台</div>
+    </div>
+  </div>
+  <ul>
+    <li class="nav-h">运营</li>
+    <li><a href="#accounts" data-view="accounts" class="on">账号池</a></li>
+    <li><a href="#tasks" data-view="tasks">任务中心</a></li>
+    <li class="nav-h">观测</li>
+    <li><a href="#usage" data-view="usage">用量</a></li>
+    <li><a href="#limits" data-view="limits">闸门与限速</a></li>
+    <li class="nav-h">配置</li>
+    <li><a href="#official" data-view="official">官方 API</a></li>
+    <li><a href="#debug" data-view="debug">调试</a></li>
+    <li><a href="#config" data-view="config">配置</a></li>
+  </ul>
+</nav>
+<main class="wrap">
+<section class="view" id="view-accounts">
+  <section class="cards" id="cards" aria-label="总览"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>账号池</h2>
+      <div class="panel-actions">
+        <button class="btn" id="addToggle" type="button">添加账号</button>
+      </div>
+    </div>
+
+    <form class="add-form hidden" id="addForm" autocomplete="off">
+      <div class="field">
+        <label for="accName">名称</label>
+        <input id="accName" name="name" placeholder="acc1" required>
+      </div>
+      <div class="field grow">
+        <label for="accCookie">会话 Cookie</label>
+        <input id="accCookie" name="cookie" placeholder="auth_session=…（可直接粘裸 token）" required>
+      </div>
+      <div class="field">
+        <label for="accNote">备注</label>
+        <input id="accNote" name="note" placeholder="可选">
+      </div>
+      <div class="field submit">
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+    </form>
+
+    <details id="importBox">
+      <summary>批量导入（一行一个：<code>账号名----auth_session=…</code>）</summary>
+      <form id="importForm">
+        <div class="field">
+          <label for="importText">粘贴多行凭据</label>
+          <textarea id="importText" name="text" rows="5" spellcheck="false"
+                    placeholder="acc3----auth_session=xxxxx&#10;acc4----auth_session=yyyyy"></textarea>
+        </div>
+        <div class="field submit">
+          <button class="btn" type="submit">批量导入</button>
+        </div>
+      </form>
+      <pre id="importResult" class="hint"></pre>
+    </details>
+
+    <div class="table-wrap">
+      <table id="accountsTable">
+        <thead>
+          <tr>
+            <th>账号</th><th>状态</th><th class="num">余额</th><th>套餐 / 额度</th>
+            <th>闸门</th><th class="num">在跑</th><th>最近探测</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="accountsBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">凭据只落在 <code>auths/*.json</code>（0600），从不进日志与响应体；这里只显示掩码。</p>
+  </section>
+
+</section>
+
+<section class="view hidden" id="view-tasks">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>任务</h2>
+      <div class="panel-actions">
+        <label class="select">
+          条数
+          <select id="taskLimit">
+            <option>20</option>
+            <option selected>50</option>
+            <option>100</option>
+            <option>200</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="tasksTable">
+        <thead>
+          <tr><th>任务 id</th><th>模型</th><th>状态</th><th>扣费</th><th>账号</th><th>上游任务</th><th>创建</th><th class="num">告警</th></tr>
+        </thead>
+        <tbody id="tasksBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">列表是<strong>本地记录</strong>（不打上游）；逐条查询才是权威口径。站点没有取消端点，跑着的任务照跑照扣。</p>
+  </section>
+</section>
+
+<section class="view hidden" id="view-usage">
+  <section class="panel">
+    <div class="panel-head"><h2>用量</h2></div>
+    <div class="cards" id="usageCards"></div>
+    <p class="hint">余额来自账号凭据自己的额度接口；任务数与付费条数来自本地记录（不额外打上游）。</p>
+  </section>
+</section>
+
+<section class="view hidden" id="view-limits">
+  <section class="panel">
+    <div class="panel-head"><h2>闸门与限速</h2></div>
+    <div class="table-wrap">
+      <table id="limitTable">
+        <thead><tr><th>账号</th><th>闸门</th><th>可绕行</th><th>最近探测</th><th>备注</th></tr></thead>
+        <tbody id="limitBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">实测口径：同一出口 <strong>10 秒内 3~4 条</strong>提交会翻闸门；冷却约 <strong>10 分钟</strong>（期间零请求）。
+      撞上后服务会给该号开 2 分钟绕行窗口。详见仓库 <code>docs/web-reverse.md</code>。</p>
+  </section>
+</section>
+
+<section class="view hidden" id="view-official">
+  <section class="panel">
+    <div class="panel-head"><h2>官方 API</h2></div>
+    <div class="cards" id="officialCards"></div>
+    <p class="hint">官方 REST（<code>/api/v1/*</code>）用 API Key 鉴权，<strong>没有 cookie、没有 Turnstile 闸门</strong>，
+      并且多出 seedance20 / wan30 / happyhorse 等模型。720p 及以上走这条路，480p 仍走网页免费档。</p>
+  </section>
+</section>
+
+<section class="view hidden" id="view-debug">
+  <section class="panel">
+    <div class="panel-head"><h2>调试</h2></div>
+    <p class="hint">
+      先用 <strong>dry-run</strong> 看清楚会走哪条路、要不要钱，再决定发不发。
+      dry-run 只做翻译，<strong>不联网、不花钱</strong>。
+    </p>
+
+    <form id="debugForm" autocomplete="off">
+      <div class="field">
+        <label for="dbgModel">模型</label>
+        <input id="dbgModel" list="dbgModels" value="minimaxH3" required>
+        <datalist id="dbgModels">
+          <option value="minimaxH3"><option value="seedance20"><option value="wan30">
+          <option value="happyhorse"><option value="t2v"><option value="i2v">
+          <option value="t2v_v3"><option value="i2v_v3">
+        </datalist>
+      </div>
+      <div class="field">
+        <label for="dbgChannel">通路</label>
+        <select id="dbgChannel">
+          <option value="">自动（网页优先）</option>
+          <option value="web">强制网页（免费档）</option>
+          <option value="official">强制官方（计费）</option>
+        </select>
+      </div>
+      <div class="field"><label for="dbgDur">时长(s)</label><input id="dbgDur" type="number" value="5" min="1" max="20"></div>
+      <div class="field"><label for="dbgRes">分辨率</label><input id="dbgRes" value="480p" placeholder="480p / 720p / 720"></div>
+      <div class="field"><label for="dbgRatio">比例</label><input id="dbgRatio" value="16:9"></div>
+      <div class="field grow">
+        <label for="dbgPrompt">提示词</label>
+        <input id="dbgPrompt" value="a red leaf drifting on calm water" required>
+      </div>
+      <div class="field grow">
+        <label for="dbgImage">首帧图 URL（i2v 必填，选填）</label>
+        <input id="dbgImage" placeholder="https://…">
+      </div>
+      <div class="field submit">
+        <button class="btn primary" type="button" id="dbgPlan">Dry-run（免费）</button>
+      </div>
+      <div class="field submit">
+        <button class="btn" type="button" id="dbgSubmit">真跑</button>
+      </div>
+      <label class="hint"><input type="checkbox" id="dbgConfirm"> 我知道这是真请求</label>
+      <label class="hint"><input type="checkbox" id="dbgAllowBilled"> 允许计费（官方通路 / 超出免费窗口）</label>
+    </form>
+
+    <pre id="dbgOut" class="hint debug-out"></pre>
+
+    <div class="panel-head debug-hist-head">
+      <h2>历史</h2>
+      <div class="panel-actions"><button class="btn ghost" type="button" id="dbgHistReload">刷新</button></div>
+    </div>
+    <div class="table-wrap">
+      <table id="dbgHistTable">
+        <thead><tr><th>时间</th><th>类型</th><th>模型</th><th>通路</th><th>计费</th><th>结果</th></tr></thead>
+        <tbody id="dbgHistBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</section>
+
+<section class="view hidden" id="view-config">
+  <section class="panel">
+    <div class="panel-head"><h2>配置</h2></div>
+    <div class="table-wrap">
+      <table id="configTable">
+        <thead><tr><th>项</th><th>值</th></tr></thead>
+        <tbody id="configBody"><tr><td colspan="2" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">这里只展示<strong>不含凭据</strong>的运行参数；密钥只以"是否配置"的形式出现。</p>
+  </section>
+</section>
+</div>
+</main>
+
+<div class="overlay hidden" id="loginOverlay">
+  <form class="login-card" id="loginForm">
+    <h2>需要口令</h2>
+    <p class="muted">面板与 API 共用同一个密钥（<code>panel.password</code> 或 <code>api_key</code>）。</p>
+    <input id="loginPassword" type="password" placeholder="口令" required>
+    <button class="btn primary" type="submit">进入</button>
+    <p class="error" id="loginError"></p>
+  </form>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script src="/panel/app.js"></script>
+</body>
+</html>

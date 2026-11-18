@@ -1,0 +1,199 @@
+name: release
+
+# 纯自动发版：push 到 main ⇒ 读最新版本 tag、patch +1 ⇒ 构建多架构镜像 ⇒ 打 tag ⇒ 建 Release。
+# 顺序刻意是「先推镜像、后打 tag」：构建失败时不会留下「有 tag、没镜像」的半成品。
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # 打 tag + 建 Release
+  packages: write   # 推 GHCR
+
+# 同一分支串行：两个人先后 push 时，两个进程不会同时读到同一个 tag 再各自自增。
+# 不用 cancel-in-progress：发版跑到中途被取消会留下「镜像已推、tag 未打」的中间态。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    # 逃生阀：[skip release] 命中整条流水线跳过（匹配的是完整 commit message）。
+    # actor 守卫是兜底：将来若换 PAT 推送，避免自触发。
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message || '', '[skip release]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+      short: ${{ steps.ver.outputs.short }}
+      mode: ${{ steps.ver.outputs.mode }}
+      commit: ${{ steps.ver.outputs.commit }}
+      changelog: ${{ steps.ver.outputs.changelog }}
+    steps:
+      # 分支 push 必须钉 github.sha：github.ref 是移动指针，等构建跑完可能已不是本次提交。
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0     # 缺这条历史 tag 拿不到，版本号会永远从 v0.0.1 起算
+
+      - id: ver
+        name: 计算下一个版本
+        run: |
+          set -euo pipefail
+
+          # 同一个提交上已有版本 tag ⇒ 这是「重跑/补发」，沿用该 tag，绝不二次自增。
+          TAG_AT_HEAD="$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+          if [ -n "$TAG_AT_HEAD" ]; then
+            MODE=retry
+            TAG="$TAG_AT_HEAD"
+            PREV="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${TAG}^" 2>/dev/null || true)"
+          else
+            MODE=auto
+            # --sort=-v:refname 而非 git describe：后者取「最近可达 tag」，合并历史下会挑错。
+            LATEST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+            if [ -n "$LATEST" ]; then PREV="$LATEST"; else PREV=""; fi
+            LATEST="${LATEST:-v0.0.0}"        # 冷启动：零 tag 时从 v0.0.0 起算
+            CORE="${LATEST#v}"
+            CORE="${CORE%%[-+]*}"             # 剥掉 -rc.1 / +build 后缀，否则算术报错
+            MAJOR="${CORE%%.*}"
+            REST="${CORE#*.}"
+            MINOR="${REST%%.*}"
+            PATCH="${REST#*.}"
+            TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          # 现有 tag 已存在（并发或人工抢先）⇒ 直接失败，不覆盖别人的版本。
+          if [ "$MODE" = auto ] && git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "tag ${TAG} 已存在，拒绝自增覆盖" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "version=${TAG#v}"        # 镜像 tag 不带 v 前缀
+            echo "short=$(git rev-parse --short=7 HEAD)"
+            echo "mode=${MODE}"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+          # 多行内容必须用 heredoc 写 $GITHUB_OUTPUT，单行 echo 会被截断。
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            if [ -z "$PREV" ]; then
+              # 首个 release 走全量历史，限长避免正文失控
+              git log HEAD --no-merges --max-count=50 --pretty='- %s (%h)'
+              echo ''
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
+            else
+              git log "${PREV}..HEAD" --no-merges --pretty='- %s (%h)'
+              echo ''
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          echo "mode=${MODE} tag=${TAG} prev=${PREV:-<none>}"
+
+  test:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.22'
+          cache: true
+      - name: vet
+        run: go vet ./...
+      - name: test
+        # 全部单测零外发（上游一律 httptest 假站点）⇒ CI 里不会碰到真实站点。
+        run: go test ./... -count=1
+
+  image:
+    needs: [resolve, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # 三个 tag 出自同一次 build ⇒ digest 必须一致。
+          tags: |
+            type=raw,value=${{ needs.resolve.outputs.version }}
+            type=raw,value=latest
+            type=raw,value=sha-${{ needs.resolve.outputs.short }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.commit }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: [resolve, image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+
+      # runner 上没有全局 git 配置，annotated tag 需要 committer 身份，否则 exit 128。
+      - name: 配置 git 身份
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 打 tag 并推送
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          MODE: ${{ needs.resolve.outputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = retry ]; then
+            echo "重跑路径：${TAG} 已存在，跳过打 tag"
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "tag ${TAG} 已存在（可能是并发发版），终止" >&2
+            exit 1
+          fi
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+
+      - name: 建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          NOTES: ${{ needs.resolve.outputs.changelog }}
+        run: |
+          set -euo pipefail
+          # 幂等：补跑/重跑不因 already exists 变红。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} 已存在，跳过创建"
+            exit 0
+          fi
+          printf '%s\n' "$NOTES" > /tmp/release-notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md --verify-tag
