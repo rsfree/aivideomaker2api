@@ -251,7 +251,7 @@ func TestArkCreateOnlyReturnsIDAndHidesUpstreamURL(t *testing.T) {
 func TestDryRunDoesNotCreateAnything(t *testing.T) {
 	h := newHarness(t, nil, "")
 	code, out := h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks",
-		`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":15,"resolution":"480p"}`,
+		`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":10,"resolution":"480p"}`,
 		map[string]string{"X-Avm-Dry-Run": "1"})
 	if code != http.StatusOK || out["dry_run"] != true {
 		t.Fatalf("dry-run status=%d out=%#v", code, out)
@@ -617,6 +617,15 @@ func TestListModelsExplainsChannelAndCost(t *testing.T) {
 	if extra["channel"] != "both" {
 		t.Errorf("minimaxH3 channel = %v, want both", extra["channel"])
 	}
+	// 免费档的档位必须与入口校验同源：480p 5/10、720p 5/8，且不含 1080p。
+	if got := fmt.Sprint(extra["resolutions"]); got != "[480p 720p]" {
+		t.Errorf("minimaxH3 resolutions = %v, want [480p 720p]", extra["resolutions"])
+	}
+	byRes, _ := extra["durations_by_resolution"].(map[string]any)
+	if fmt.Sprint(byRes["480p"]) != "[5 10]" || fmt.Sprint(byRes["720p"]) != "[5 8]" {
+		t.Errorf("durations_by_resolution = %v, want 480p:[5 10] 720p:[5 8]",
+			extra["durations_by_resolution"])
+	}
 	sd, ok := byID["seedance20"]
 	if !ok {
 		t.Fatal("seedance20 missing")
@@ -644,5 +653,88 @@ func TestListModelsExplainsChannelAndCost(t *testing.T) {
 	code, _ = h.do(t, http.MethodGet, "/v1/models/nope", "", nil)
 	if code == http.StatusOK {
 		t.Error("unknown model should not return 200")
+	}
+}
+
+// 方舟协议面（/api/v3/contents/generations/tasks）的枚举准入：
+// 只有 480p@5/10s、720p@5/8s 能过，其余在提交期就 400 —— 不回落默认、不吸附。
+func TestArkRejectsOutOfEnumDuration(t *testing.T) {
+	h := newHarness(t, nil, "")
+	cases := []struct {
+		body  string
+		param string
+		why   string
+	}{
+		{`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":8,"resolution":"480p"}`,
+			"duration", "480p only has 5s/10s"},
+		{`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":10,"resolution":"720p"}`,
+			"duration", "720p only has 5s/8s"},
+		{`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":5,"resolution":"1080p"}`,
+			"resolution", "1080p is not on the web line"},
+	}
+	for _, c := range cases {
+		code, out := h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks", c.body, nil)
+		if code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 (%v)", c.why, code, out)
+			continue
+		}
+		block, _ := out["error"].(map[string]any)
+		if block["code"] != "InvalidParameter" {
+			t.Errorf("%s: code = %v, want InvalidParameter", c.why, block["code"])
+		}
+		if block["param"] != c.param {
+			t.Errorf("%s: param = %v, want %s", c.why, block["param"], c.param)
+		}
+		msg, _ := block["message"].(string)
+		if !strings.Contains(msg, "480p") && !strings.Contains(msg, "5s") {
+			t.Errorf("%s: message must name the enum, got %q", c.why, msg)
+		}
+	}
+	if h.store.Count("") != 0 {
+		t.Error("a rejected submission must not persist a task")
+	}
+}
+
+// 固定组合别名必须出现在 /v1/models 里 —— 下游（new-api / apiduo）按模型名路由，
+// 列表里没有的名字它们不会用。
+func TestModelAliasesAreAdvertised(t *testing.T) {
+	h := newHarness(t, nil, "")
+	code, out := h.do(t, http.MethodGet, "/v1/models", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (%v)", code, out)
+	}
+	byID := map[string]bool{}
+	for _, raw := range out["data"].([]any) {
+		m, _ := raw.(map[string]any)
+		byID[fmt.Sprint(m["id"])] = true
+	}
+	for _, id := range []string{
+		"minimax-h3-480p-5s", "minimax-h3-480p-10s",
+		"minimax-h3-720p-5s", "minimax-h3-720p-8s",
+	} {
+		if !byID[id] {
+			t.Errorf("alias %q missing from /v1/models", id)
+		}
+	}
+	if byID["minimax-h3-720p-10s"] {
+		t.Error("minimax-h3-720p-10s must NOT exist: 720p only has 5s/8s")
+	}
+}
+
+// 枚举外的组合不是"降级"，是 unknown model —— 报文要列出可用名字。
+func TestAliasOutsideTheEnumIsUnknown(t *testing.T) {
+	h := newHarness(t, nil, "")
+	code, out := h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks",
+		`{"model":"minimax-h3-720p-10s","content":[{"type":"text","text":"x"}]}`, nil)
+	if code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%v)", code, out)
+	}
+	block, _ := out["error"].(map[string]any)
+	msg, _ := block["message"].(string)
+	if !strings.Contains(msg, "supported fixed aliases") || !strings.Contains(msg, "minimax-h3-720p-8s") {
+		t.Errorf("unknown alias must list the supported names, got %q", msg)
+	}
+	if h.store.Count("") != 0 {
+		t.Error("an unknown model must not persist a task")
 	}
 }

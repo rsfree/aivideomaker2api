@@ -39,8 +39,15 @@ import (
 
 func paramErr(msg, param string) error { return apierr.Param(msg, param) }
 
-// ArkResolutions 是站点接受的分辨率档位。
-var ArkResolutions = map[string]bool{"480p": true, "720p": true, "1080p": true}
+// WebResolutions 是**网页免费线**的分辨率档位（写死两档）。
+//
+// 只保留实测免费的两档。1080p 从网页线移除：它无论多短都计费（2026-11-08 实测
+// 1080p/5s 扣 20 积分），留在网页面上只会让调用方误以为免费。显式点名 official
+// 的通路在更早的分叉里已经返回，不受本表约束 —— 那条线按秒计费。
+var WebResolutions = map[string]bool{"480p": true, "720p": true}
+
+// WebResolutionList 是上表的展示顺序（错误信息用）。
+var WebResolutionList = []string{"480p", "720p"}
 
 // DefaultResolution 是调用方未点名分辨率时代入的站点档位（**唯一真源**）：
 // Create 靠它定档位，/v1/videos 的「钉死时长」表也按它查键 —— 两处各写一个字面量
@@ -66,27 +73,100 @@ var SizePresets = map[string]string{
 	"portrait": "9:16", "landscape": "16:9", "square": "1:1", "ultrawide": "21:9",
 }
 
-// DurationAllowed 是各分辨率的合法时长。
+// DurationAllowed 是各分辨率**唯一允许**的时长（写死的离散表）。
 //
-// 站点对 **480p 只收离散的 `5 / 10 / 15 / 20`**。站点原话（真实提交被拒时返回）：
+//	480p → 5s / 10s
+//	720p → 5s / 8s
 //
-//	ai.minimaxH3: 480p supports 5s, 10s, 15s, or 20s duration.
-//
-// 6/7→5、8/9→10、11/12→10、13/14→15、16/17→15、18/19→20。吸附不会把免费区请求
-// 带进计费区：≤10s 的请求只落 5 或 10（均为免费档）。
-// ⚠️ 1080p 是否同为离散档位尚未实测，保持连续区间 5~20，别顺手一起改。
+// 口径来源：2026-11-19 站点侧确认 —— 480p 只收 5/10，720p 只收 5/8。
+// （更早的"720p 连续 5–20"来自当时的观察，已被这条更窄的枚举取代。）
+// 其余取值（6/7/9/11…）发出去只会被上游拒；与其换一个看不懂的 502，不如在入口
+// 报 400 并列出合法值。这里**不设任何吸附例外** —— 改时长就是改账单。
 var DurationAllowed = map[string][]int{
-	"480p":  {5, 10, 15, 20},
-	"720p":  seq(5, 20),
-	"1080p": seq(5, 20),
+	"480p": {5, 10},
+	"720p": {5, 8},
 }
 
-func seq(from, to int) []int {
-	out := make([]int, 0, to-from+1)
-	for i := from; i <= to; i++ {
-		out = append(out, i)
+// DurationOptions 返回某分辨率允许的时长；未知档位返回 nil。
+func DurationOptions(resolution string) []int {
+	return DurationAllowed[strings.ToLower(strings.TrimSpace(resolution))]
+}
+
+// durationChoices 把允许值渲染成 `5s / 10s`（错误信息用）。
+func durationChoices(resolution string) string {
+	opts := DurationOptions(resolution)
+	parts := make([]string, 0, len(opts))
+	for _, v := range opts {
+		parts = append(parts, fmt.Sprintf("%ds", v))
 	}
-	return out
+	return strings.Join(parts, " / ")
+}
+
+// enumSummary 把**整张档位表**渲染成一句话：`480p: 5s / 10s; 720p: 5s / 8s`。
+//
+// 400 报文必须一次讲清"能传什么"：只报当前分辨率，调用方改分辨率后还要再撞一次；
+// 直接给全矩阵，改哪个字段都心里有数。
+func enumSummary() string {
+	parts := make([]string, 0, len(WebResolutionList))
+	for _, res := range WebResolutionList {
+		parts = append(parts, res+": "+durationChoices(res))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// ModelAlias 把「分辨率 + 时长」编码进模型名。
+//
+// 🔴 这是一张**闭集**：每个名字都是显式声明的一条，精确匹配、没有正则、没有猜测。
+// （slots 层有过反面教训：一张"名字含 seedance 就走 seedance20"的正则表，把 5 个
+// 代次静默压进同一槽位，账单差 7.3 倍。）查不到就是查不到 —— 由 slots 层报 unknown model。
+//
+// 好处不在于"少写两个字段"，而在于**组合在路由层就被钉死**：只支持免费档的网关
+// （new-api / apiduo 这类按模型名路由与计价的下游）拿到模型名就等于拿到了合法参数。
+type ModelAlias struct {
+	Name       string // 对外模型名
+	Slot       string // 上游槽位
+	Resolution string // 钉死的分辨率
+	Duration   int    // 钉死的时长
+}
+
+// ModelAliases 是全部固定组合别名。取值与 DurationAllowed 必须一致 ——
+// 有一条单测（TestModelAliasesStayInsideTheEnum）守着，别手工漂移。
+var ModelAliases = []ModelAlias{
+	{"minimax-h3-480p-5s", "minimaxH3", "480p", 5},
+	{"minimax-h3-480p-10s", "minimaxH3", "480p", 10},
+	{"minimax-h3-720p-5s", "minimaxH3", "720p", 5},
+	{"minimax-h3-720p-8s", "minimaxH3", "720p", 8},
+}
+
+// aliasHint 给"看起来像固定别名、但表里没有"的名字准备一条**可操作**的 400。
+//
+// 它只影响错误文案的分流，不参与路由：路由仍然只认 LookupModelAlias 的精确命中。
+// 没有这条，调用方会拿到 slots 层的"必须是一个上游槽位" —— 而别名本来就不是槽位。
+func aliasHint(name string) (string, bool) {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if !strings.HasPrefix(n, "minimax-h3-") && !strings.HasPrefix(n, "minimaxh3-") {
+		return "", false
+	}
+	names := make([]string, 0, len(ModelAliases))
+	for _, a := range ModelAliases {
+		names = append(names, a.Name)
+	}
+	return fmt.Sprintf(
+		"unknown model %q: supported fixed aliases are %s (the enum is — %s). "+
+			"If you need another combination, send model %q and pass resolution/duration explicitly — "+
+			"values outside the enum are rejected",
+		name, strings.Join(names, ", "), enumSummary(), "minimaxH3"), true
+}
+
+// LookupModelAlias 精确匹配别名（大小写不敏感，回显仍用调用方原名）。
+func LookupModelAlias(name string) (ModelAlias, bool) {
+	n := strings.ToLower(strings.TrimSpace(name))
+	for _, a := range ModelAliases {
+		if a.Name == n {
+			return a, true
+		}
+	}
+	return ModelAlias{}, false
 }
 
 // FreeMaxDuration 是免费窗口的上界：turbo 且不超过它就不计费。
@@ -162,43 +242,29 @@ func NormalizeRatio(raw, label, fallback string, presets map[string]string) (str
 	return got.Ratio, []string{label + "=" + got.Note}, nil
 }
 
-// SnapDuration 把时长吸附到该分辨率的合法取值上。
+// ResolveDuration 只做一件事：**枚举校验**。
 //
-// 720p/1080p 的约束是"连续秒数 + 上限"，绝大多数请求原样透传，只有越界值才会被
-// 就近钳制；**480p 是离散表**，非档位值一律就近吸附 —— 不吸附的话 6/7/8/9/11..14/
-// 16..19s 会原样发出并 502。
+//	480p → 5s / 10s
+//	720p → 5s / 8s
 //
-// preferFree=true 是**省钱开关**，语义为"别越过免费线"：凡是超过 FreeMaxDuration
-// 的合法时长（例如 15s）都会被主动拉回免费上界 —— 而不只是在越界时才生效。
-func SnapDuration(duration int, resolution string, preferFree bool) int {
-	allowed := DurationAllowed[resolution]
-	if len(allowed) == 0 {
-		allowed = []int{5}
+// 命中返回原值，否则返回参数错误（报文列出枚举）。这里**没有**任何吸附路径：
+// 不就近取整、不因 preferFree 拉回、不因越界钳制 —— 改一个字都不是调用方要的时长。
+// 想省钱的调用方应当自己从枚举里选，而不是让我们替他改。
+func ResolveDuration(duration int, resolution string) (int, error) {
+	opts := DurationOptions(resolution)
+	if len(opts) == 0 {
+		return 0, paramErr(fmt.Sprintf(
+			"resolution: %q has no supported duration table (the web line supports: %s)",
+			resolution, strings.Join(WebResolutionList, ", ")), "resolution")
 	}
-	if preferFree && duration > FreeMaxDuration {
-		best := 0
-		for _, a := range allowed {
-			if a <= FreeMaxDuration && a > best {
-				best = a
-			}
-		}
-		if best > 0 {
-			return best
+	for _, v := range opts {
+		if v == duration {
+			return v, nil
 		}
 	}
-	for _, a := range allowed {
-		if a == duration {
-			return a
-		}
-	}
-	best := allowed[0]
-	bestDist := math.Abs(float64(best - duration))
-	for _, a := range allowed[1:] {
-		if d := math.Abs(float64(a - duration)); d < bestDist || (d == bestDist && a < best) {
-			best, bestDist = a, d
-		}
-	}
-	return best
+	return 0, paramErr(fmt.Sprintf(
+		"duration: %ds is not supported for %s (supported — %s)",
+		duration, resolution, enumSummary()), "duration")
 }
 
 // RefIndicesInPrompt 抽出提示词里的 `@图像n` / `@视频n` / `@音频n` 引用编号（1-based，去重保序）。
@@ -348,7 +414,23 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 	if model == "" {
 		return nil, paramErr("model is required", "model")
 	}
-	modelRes, err := slots.ResolveModel(model, channelOptions, forceSlot)
+	// 别名只改**解析用**的槽位名；`model` 保持调用方原名，回显必须是原名
+	// （否则下游按回显名做路由，下一轮就找不到模型了）。
+	modelRaw := model
+	alias, hasAlias := LookupModelAlias(model)
+	if !hasAlias {
+		if hint, ok := aliasHint(model); ok {
+			return nil, paramErr(hint, "model")
+		}
+	}
+	baseModel := model
+	if hasAlias {
+		baseModel = alias.Slot
+		warnings = append(warnings, fmt.Sprintf(
+			`model %q is a fixed alias: %s @ %ds (resolution and duration are pinned; `+
+				"conflicting body fields are rejected)", modelRaw, alias.Resolution, alias.Duration))
+	}
+	modelRes, err := slots.ResolveModel(baseModel, channelOptions, forceSlot)
 	if err != nil {
 		// 网页槽位不认这个名字 —— 如果官方支持，就落官方（t2v / wan30 / happyhorse …）。
 		// 这类模型网页端**根本没有**，报"unknown model"对调用方毫无帮助。
@@ -415,10 +497,19 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 	}
 
 	resolution := DefaultResolution
+	if hasAlias {
+		resolution = alias.Resolution
+	}
 	if raw, ok := body["resolution"]; ok && raw != nil && jsonx.String(raw) != "" {
 		r := jsonx.String(raw)
-		if !ArkResolutions[r] {
-			return nil, paramErr(fmt.Sprintf("resolution: invalid enum value %q", r), "resolution")
+		if hasAlias && r != alias.Resolution {
+			return nil, paramErr(fmt.Sprintf(
+				"resolution: model %q pins %s — omit the field, or use %q (request said %q)",
+				modelRaw, alias.Resolution, modelRaw, r), "resolution")
+		}
+		if !WebResolutions[r] {
+			return nil, paramErr(fmt.Sprintf(
+				"resolution: invalid enum value %q (supported — %s)", r, enumSummary()), "resolution")
 		}
 		resolution = r
 	}
@@ -430,7 +521,9 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 		if !ok {
 			// 原实现这里会把非法类型漏成 500（已知缺陷，已登记备查）。
 			// 移植版改判 400：把"客户端传错参数"报成"服务端故障"是纯损失。
-			return nil, paramErr(fmt.Sprintf("duration: expected a number of seconds, got %v", rawDuration), "duration")
+			return nil, paramErr(fmt.Sprintf(
+				"duration: expected a number of seconds, got %v (supported — %s)",
+				rawDuration, enumSummary()), "duration")
 		}
 		if d == -1 {
 			five := 5
@@ -456,21 +549,30 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 			preferFree = b
 		}
 	}
-	var requestedDuration *int
-	if duration != nil {
-		v := *duration
-		requestedDuration = &v
+	if hasAlias {
+		if duration != nil && *duration != alias.Duration {
+			return nil, paramErr(fmt.Sprintf(
+				"duration: model %q pins %ds — omit the field, or use %q (request said %ds)",
+				modelRaw, alias.Duration, modelRaw, *duration), "duration")
+		}
+		pinned := alias.Duration
+		duration = &pinned
 	}
 	base := 5
 	if duration != nil {
 		base = *duration
 	}
-	snapped := SnapDuration(base, resolution, preferFree)
-	if requestedDuration != nil && *requestedDuration != snapped {
-		warnings = append(warnings, fmt.Sprintf("duration %ss snapped to %ds (site limit for %s)",
-			formatNum(*requestedDuration), snapped, resolution))
+	resolved, err := ResolveDuration(base, resolution)
+	if err != nil {
+		return nil, err
 	}
-	duration = &snapped
+	duration = &resolved
+	if preferFree {
+		// 开关还在解析（不发 400），但它已经不能改变任何时长：枚举就是全部。
+		// 静默忽略会让调用方以为自己省到了钱，所以必须留痕。
+		warnings = append(warnings, "aivideomaker_prefer_free has no effect: the web free tier is a fixed "+
+			"enum (480p: 5s/10s, 720p: 5s/8s) and any other duration is rejected")
+	}
 
 	if aspect != "" && len(ci.first) > 0 && ratioValue != "adaptive" {
 		warnings = append(warnings, `Ark requires ratio="adaptive" when role=first_frame; ratio is derived `+
@@ -644,6 +746,11 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 		"model_source":   modelRes.Source,
 		"model_verified": modelRes.Verified,
 	}
+	// 别名是"调用方写了一个组合名"，不是"他直接点了槽位" —— 排障时这两者要能分开，
+	// 否则看到 model=minimaxH3 会以为调用方写的就是这个。
+	if hasAlias {
+		effective["model_alias"] = modelRaw
+	}
 
 	webParams := map[string]any{}
 	for k, v := range params {
@@ -758,8 +865,8 @@ func EstimatedCredits(tier string, duration int, resolution string) (int, bool) 
 
 // BillingNote 一句话说清这条上游怎么计费（/healthz 与 effective 都引用它）。
 func BillingNote() string {
-	return fmt.Sprintf("web upstream: 480p/720p with tier=turbo is free up to %ds; "+
-		"tier=base and every 1080p request are always billed", FreeMaxDuration)
+	return "web upstream: minimaxH3 free tier accepts 480p @ 5s/10s and 720p @ 5s/8s " +
+		"(tier=turbo); every other duration or resolution is rejected at the edge, tier=base is always billed"
 }
 
 // BillingView 渲染计费口径。

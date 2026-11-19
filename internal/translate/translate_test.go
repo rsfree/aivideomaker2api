@@ -57,64 +57,90 @@ func TestWebParamsArraysAreNeverNull(t *testing.T) {
 	}
 }
 
-func TestSnapDurationTable(t *testing.T) {
-	cases := []struct {
-		d    int
-		res  string
-		want int
+func TestResolveDurationEnumOnly(t *testing.T) {
+	legal := []struct {
+		d   int
+		res string
 	}{
-		{6, "480p", 5}, {7, "480p", 5}, {8, "480p", 10}, {9, "480p", 10},
-		{11, "480p", 10}, {13, "480p", 15}, {16, "480p", 15}, {18, "480p", 20},
-		{5, "480p", 5}, {10, "480p", 10}, {20, "480p", 20},
-		{3, "720p", 5}, {21, "720p", 20}, {7, "720p", 7}, {12, "1080p", 12},
+		{5, "480p"}, {10, "480p"},
+		{5, "720p"}, {8, "720p"},
 	}
-	for _, c := range cases {
-		if got := SnapDuration(c.d, c.res, false); got != c.want {
-			t.Errorf("SnapDuration(%d, %s) = %d, want %d", c.d, c.res, got, c.want)
+	for _, c := range legal {
+		got, err := ResolveDuration(c.d, c.res)
+		if err != nil || got != c.d {
+			t.Errorf("ResolveDuration(%d, %s) = (%d, %v), want (%d, nil)",
+				c.d, c.res, got, err, c.d)
 		}
 	}
-	// preferFree：主动拉回免费上界（不只是越界时才生效）
-	if got := SnapDuration(15, "480p", true); got != 10 {
-		t.Errorf("preferFree 15s/480p = %d, want 10", got)
+	illegal := []struct {
+		d   int
+		res string
+	}{
+		{6, "480p"}, {8, "480p"}, {15, "480p"}, {20, "480p"},
+		{4, "720p"}, {7, "720p"}, {10, "720p"}, {20, "720p"},
+		{5, "1080p"},
 	}
-	if got := SnapDuration(20, "720p", true); got != 10 {
-		t.Errorf("preferFree 20s/720p = %d, want 10", got)
-	}
-	if got := SnapDuration(8, "720p", true); got != 8 {
-		t.Errorf("preferFree must not touch in-window values, got %d", got)
+	for _, c := range illegal {
+		if _, err := ResolveDuration(c.d, c.res); err == nil {
+			t.Errorf("ResolveDuration(%d, %s) must be rejected", c.d, c.res)
+		}
 	}
 }
 
-func TestCreateWarnsOnDurationSnap(t *testing.T) {
+// prefer_free 不再是吸附开关：它不能把非法时长变成合法请求，只能留下"无效果"的说明。
+func TestPreferFreeNoLongerSnaps(t *testing.T) {
 	body := textBody("minimaxH3")
-	body["duration"] = 8
 	body["resolution"] = "480p"
-	plan, err := Create(body, nil, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if plan.WebParams["duration"] != 10 {
-		t.Errorf("duration = %v, want 10 (480p only accepts 5/10/15/20)", plan.WebParams["duration"])
-	}
-	if !hasWarning(plan.Warnings, "snapped to 10s") {
-		t.Errorf("snapping must leave a trace, warnings=%v", plan.Warnings)
-	}
-}
-
-func TestBillingViewShoutsWhenCrossingFreeWindow(t *testing.T) {
-	body := textBody("minimaxH3")
 	body["duration"] = 15
-	body["resolution"] = "480p"
+	body["extra_body"] = map[string]any{"aivideomaker_prefer_free": true}
+	if _, err := Create(body, nil, ""); err == nil {
+		t.Fatal("prefer_free must not turn 480p/15s into a valid request")
+	}
+
+	body["duration"] = 5
 	plan, err := Create(body, nil, "")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("480p/5s must pass: %v", err)
 	}
-	eff, warnings := BillingView(plan)
-	if eff["billed"] != true {
-		t.Errorf("billed = %v, want true", eff["billed"])
+	if !hasWarning(plan.Warnings, "has no effect") {
+		t.Errorf("the switch must be reported as a no-op, warnings=%v", plan.Warnings)
 	}
-	if !hasWarning(warnings, "WILL BE BILLED") {
-		t.Errorf("crossing the free window must be shouted about, warnings=%v", warnings)
+}
+
+func TestCreateRejectsUnsupportedDuration(t *testing.T) {
+	body := textBody("minimaxH3")
+	body["resolution"] = "480p"
+	body["duration"] = 8
+	if _, err := Create(body, nil, ""); err == nil {
+		t.Fatal("480p/8s must be rejected at the edge (allowed: 5s / 10s)")
+	}
+	body["duration"] = 10
+	if _, err := Create(body, nil, ""); err != nil {
+		t.Fatalf("480p/10s must be accepted: %v", err)
+	}
+	body["resolution"] = "720p"
+	body["duration"] = 10
+	if _, err := Create(body, nil, ""); err == nil {
+		t.Fatal("720p/10s must be rejected (allowed: 5s / 8s)")
+	}
+	body["duration"] = 8
+	if _, err := Create(body, nil, ""); err != nil {
+		t.Fatalf("720p/8s must be accepted: %v", err)
+	}
+}
+
+func TestCreateRejectsNonFreeResolution(t *testing.T) {
+	// 1080p 曾经是"时长在免费区内却照样扣 20 积分"的静默陷阱。现在它在入口就被拒，
+	// 连一条 billed=true 的 web 任务都产生不了 —— 这比事后喊话更可靠。
+	body := textBody("minimaxH3")
+	body["resolution"] = "1080p"
+	body["duration"] = 5
+	_, err := Create(body, nil, "")
+	if err == nil {
+		t.Fatal("the web line must reject 1080p (free tier is 480p/720p only)")
+	}
+	if !strings.Contains(err.Error(), "480p: 5s / 10s") || !strings.Contains(err.Error(), "720p: 5s / 8s") {
+		t.Errorf("error must spell out the full enum matrix, got %v", err)
 	}
 }
 
@@ -362,25 +388,33 @@ func TestBilledTreats1080pAsAlwaysBilled(t *testing.T) {
 	}
 }
 
-// 越线必须有声音：1080p 在免费时长内也计费，必须给一条 warning。
-func TestBillingViewWarnsWhenResolutionHasNoFreeWindow(t *testing.T) {
-	body := map[string]any{
-		"model":      "minimaxH3",
-		"content":    []any{map[string]any{"type": "text", "text": "x"}},
-		"resolution": "1080p",
-		"duration":   5,
-	}
-	plan, err := Create(body, nil, "")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	eff, warnings := BillingView(plan)
-	if eff["billed"] != true {
-		t.Errorf("billed = %v, want true", eff["billed"])
-	}
-	joined := strings.Join(warnings, " | ")
-	if !strings.Contains(joined, "no free window") {
-		t.Errorf("warnings = %v, must explain that 1080p has no free window", warnings)
+// 免费档的承诺：四个合法组合一律 billed=false 且 estimated_credits=0。
+// （1080p 那个"时长在窗口内却扣 20 积分"的陷阱已改为入口拒绝，见
+// TestCreateRejectsNonFreeResolution；Billed 的 1080p 判据仍由纯函数测试守着。）
+func TestBillingViewFreeTierIsActuallyFree(t *testing.T) {
+	for _, c := range []struct {
+		res string
+		dur int
+	}{
+		{"480p", 5}, {"480p", 10}, {"720p", 5}, {"720p", 8},
+	} {
+		body := map[string]any{
+			"model":      "minimaxH3",
+			"content":    []any{map[string]any{"type": "text", "text": "x"}},
+			"resolution": c.res,
+			"duration":   c.dur,
+		}
+		plan, err := Create(body, nil, "")
+		if err != nil {
+			t.Fatalf("Create(%s/%ds): %v", c.res, c.dur, err)
+		}
+		eff, _ := BillingView(plan)
+		if eff["billed"] != false {
+			t.Errorf("%s/%ds billed = %v, want false", c.res, c.dur, eff["billed"])
+		}
+		if credits, ok := eff["estimated_credits"]; !ok || credits != 0 {
+			t.Errorf("%s/%ds estimated_credits = %v, want 0", c.res, c.dur, credits)
+		}
 	}
 }
 
@@ -414,22 +448,10 @@ func TestEstimatedCreditsOnlyForMeasuredCombos(t *testing.T) {
 	}
 }
 
-// dry-run 的 effective 必须带上钱数，否则调用方只能自己按分辨率猜。
+// 计费通路的钱数预估：用官方 minimax（720p/11s 实测 33 积分）验证视图会把它带出来。
 func TestBillingViewExposesEstimatedCredits(t *testing.T) {
-	body := map[string]any{
-		"model":      "minimaxH3",
-		"content":    []any{map[string]any{"type": "text", "text": "x"}},
-		"resolution": "720p",
-		"duration":   11,
-	}
-	plan, err := Create(body, nil, "")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	eff, _ := BillingView(plan)
-	if eff["estimated_credits"] != 33 {
-		t.Errorf("estimated_credits = %v, want 33 (measured: 720p/11s cost 33 credits)",
-			eff["estimated_credits"])
+	if got, known := EstimatedCredits("turbo", 11, "720p"); !known || got != 33 {
+		t.Fatalf("EstimatedCredits(turbo, 11s, 720p) = (%d, %v), want (33, true)", got, known)
 	}
 }
 
@@ -543,5 +565,75 @@ func TestBilledIsModelAware(t *testing.T) {
 	eff2, _ := BillingView(plan2)
 	if billed, _ := eff2["billed"].(bool); billed {
 		t.Error("minimaxH3 at 480p/5s must stay free")
+	}
+}
+
+// 别名必须落在枚举内 —— 这条测试是防漂移闸门：改 DurationAllowed 或 ModelAliases
+// 任一处，都会在这里炸出来。
+func TestModelAliasesStayInsideTheEnum(t *testing.T) {
+	if len(ModelAliases) == 0 {
+		t.Fatal("no aliases defined")
+	}
+	seen := map[string]bool{}
+	for _, a := range ModelAliases {
+		if seen[a.Name] {
+			t.Errorf("duplicate alias %q", a.Name)
+		}
+		seen[a.Name] = true
+		if !WebResolutions[a.Resolution] {
+			t.Errorf("%s: resolution %q is outside the web enum", a.Name, a.Resolution)
+			continue
+		}
+		ok := false
+		for _, v := range DurationOptions(a.Resolution) {
+			if v == a.Duration {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("%s pins %ds, which is not in %s's enum %v",
+				a.Name, a.Duration, a.Resolution, DurationOptions(a.Resolution))
+		}
+	}
+}
+
+// 别名命中后参数被钉死，且回显仍是调用方原名。
+func TestModelAliasPinsParameters(t *testing.T) {
+	plan, err := Create(textBody("minimax-h3-480p-10s"), nil, "")
+	if err != nil {
+		t.Fatalf("alias must resolve: %v", err)
+	}
+	if plan.WebParams["resolution"] != "480p" || plan.WebParams["duration"] != 10 {
+		t.Errorf("alias pinned (%v, %v), want (480p, 10)",
+			plan.WebParams["resolution"], plan.WebParams["duration"])
+	}
+	if got := jsonx.String(plan.Requested["model"]); got != "minimax-h3-480p-10s" {
+		t.Errorf("requested.model = %q, want the client's original name (echo discipline)", got)
+	}
+	if !hasWarning(plan.Warnings, "fixed alias") {
+		t.Errorf("hitting an alias must leave a trace, warnings=%v", plan.Warnings)
+	}
+}
+
+// 名字钉死时，body 里的冲突值必须 400 —— 静默覆盖会重演"账单差 7.3 倍"那类事故。
+func TestModelAliasRejectsConflictingBody(t *testing.T) {
+	body := textBody("minimax-h3-480p-5s")
+	body["duration"] = 10
+	if _, err := Create(body, nil, ""); err == nil {
+		t.Fatal("conflicting duration must be rejected, not silently overridden")
+	}
+
+	body = textBody("minimax-h3-720p-8s")
+	body["resolution"] = "480p"
+	if _, err := Create(body, nil, ""); err == nil {
+		t.Fatal("conflicting resolution must be rejected")
+	}
+
+	// 相同值的显式传参不算冲突。
+	body = textBody("minimax-h3-720p-8s")
+	body["resolution"] = "720p"
+	body["duration"] = 8
+	if _, err := Create(body, nil, ""); err != nil {
+		t.Fatalf("matching explicit values must pass: %v", err)
 	}
 }

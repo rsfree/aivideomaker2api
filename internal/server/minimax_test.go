@@ -114,15 +114,15 @@ func TestMiniMaxContentRejectionSurfacesOnQuery(t *testing.T) {
 func TestMiniMaxSizeAndSubjectReference(t *testing.T) {
 	h := newHarness(t, nil, "")
 	_, out := h.do(t, http.MethodPost, "/v1/video_generation",
-		`{"prompt":"a cat","size":"1920x1080",`+
+		`{"prompt":"a cat","size":"1280x720",`+
 			`"subject_reference":[{"type":"character","image":["https://x/1.png","https://x/2.png"]}]}`,
 		map[string]string{"X-Avm-Dry-Run": "1"})
 	if out["dry_run"] != true {
 		t.Fatalf("want dry-run output, got %v", out)
 	}
 	payload, _ := out["upstream_payload"].(map[string]any)
-	if payload["resolution"] != "1080p" {
-		t.Errorf("resolution = %v, want 1080p (derived from size height)", payload["resolution"])
+	if payload["resolution"] != "720p" {
+		t.Errorf("resolution = %v, want 720p (derived from size height)", payload["resolution"])
 	}
 	if payload["aspectRatio"] != "16:9" {
 		t.Errorf("aspectRatio = %v, want 16:9", payload["aspectRatio"])
@@ -164,5 +164,32 @@ func TestMiniMaxUnknownResolutionWarnsInsteadOfSilentlyDowngrading(t *testing.T)
 	payload, _ := out["upstream_payload"].(map[string]any)
 	if payload["resolution"] != "720p" {
 		t.Errorf("resolution = %v, want the default 720p", payload["resolution"])
+	}
+}
+
+// 入口必须只放行这几个组合：480p 5/10s、720p 5/8s。
+// 越界值在 Create 就被拒，映射成 MiniMax 的参数错误码 2013，不会发到上游。
+func TestMiniMaxRejectsUnsupportedDuration(t *testing.T) {
+	h := newHarness(t, nil, "")
+	cases := []struct {
+		body string
+		why  string
+	}{
+		{`{"prompt":"a cat","size":"1280x720","duration":10}`, "720p only accepts 5s/8s"},
+		{`{"prompt":"a cat","size":"854x480","duration":8}`, "480p only accepts 5s/10s"},
+		{`{"prompt":"a cat","size":"1920x1080","duration":5}`, "1080p is not on the free line"},
+	}
+	for _, c := range cases {
+		_, out := h.do(t, http.MethodPost, "/v1/video_generation", c.body,
+			map[string]string{"X-Avm-Dry-Run": "1"})
+		br, _ := out["base_resp"].(map[string]any)
+		code, _ := br["status_code"].(float64) // JSON 往返后是 float64
+		if code != 2013 {
+			t.Errorf("%s: status_code = %v, want 2013 (%v)", c.why, br["status_code"], out)
+		}
+		msg, _ := br["status_msg"].(string)
+		if !strings.Contains(msg, "480p") && !strings.Contains(msg, "5s") {
+			t.Errorf("%s: status_msg must name the supported values, got %q", c.why, msg)
+		}
 	}
 }

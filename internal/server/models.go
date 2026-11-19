@@ -1,10 +1,13 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/rsfree/aivideomaker2api/internal/apierr"
+	"github.com/rsfree/aivideomaker2api/internal/translate"
 )
 
 // modelInfo 是 `/v1/models` 里的一条。
@@ -24,7 +27,10 @@ type modelInfo struct {
 	Credits5s   any
 	Resolutions []string
 	Durations   []string
-	Note        string
+	// DurationsByResolution 是各分辨率的**精确**合法时长（写死的离散表）。
+	// Durations 是它的并集，只留给读单个列表的老客户端。
+	DurationsByResolution map[string][]string
+	Note                  string
 }
 
 // modelCatalog 是**实测过**的清单，不是站点 UI 上抄的。
@@ -36,9 +42,14 @@ type modelInfo struct {
 var modelCatalog = []modelInfo{
 	{
 		ID: "minimaxH3", Channel: "both", WebReady: true, OfficialReady: true, Free: true, Credits5s: 0,
-		Resolutions: []string{"480p", "720p", "1080p"}, Durations: []string{"5", "10", "15", "20"},
-		Note: "唯一有免费档的模型：480p/720p + tier=turbo + ≤10s；" +
-			"官方通道 720p/5s=15、1080p/5s=20、720p/5s(base)=20 积分",
+		Resolutions: []string{"480p", "720p"},
+		Durations:   []string{"5", "8", "10"},
+		DurationsByResolution: map[string][]string{
+			"480p": {"5", "10"},
+			"720p": {"5", "8"},
+		},
+		Note: "唯一有免费档的模型，且只支持这几个组合：480p @ 5s/10s、720p @ 5s/8s（tier=turbo 不计费）；" +
+			"其他分辨率或时长在入口直接 400，不会发到上游。显式 official 通道另行计费（720p/5s=15、1080p/5s=20 积分）",
 	},
 	{
 		ID: "seedance20", Channel: "both", WebReady: false, OfficialReady: true, Free: false, Credits5s: 68,
@@ -53,7 +64,7 @@ var modelCatalog = []modelInfo{
 			"官方 5s@720P = 125 积分",
 	},
 	{
-		ID: "seedance25", Channel: "web", WebReady: true, Free: false, Credits5s: nil,
+		ID: "seedance25", Channel: "web", WebReady: false, Free: false, Credits5s: nil,
 		Resolutions: []string{"480p", "720p"}, Durations: []string{"5"},
 		Note: "网页端有 procedure（ai.seedance25），入参形态与 minimax 不同，本服务尚未适配；价格未实测",
 	},
@@ -90,6 +101,22 @@ var modelCatalog = []modelInfo{
 	},
 }
 
+// 固定组合别名（minimax-h3-480p-5s 等）与 translate.ModelAliases **同源**：
+// 这里不另写一份清单 —— 同一事实两处表达必然漂移（多一个别名、少一个枚举）。
+func init() {
+	for _, a := range translate.ModelAliases {
+		dur := strconv.Itoa(a.Duration)
+		modelCatalog = append(modelCatalog, modelInfo{
+			ID: a.Name, Channel: "web", WebReady: true, Free: true, Credits5s: 0,
+			Resolutions:           []string{a.Resolution},
+			Durations:             []string{dur},
+			DurationsByResolution: map[string][]string{a.Resolution: {dur}},
+			Note: fmt.Sprintf("固定组合别名：minimaxH3 @ %s / %ds。分辨率与时长已钉死；"+
+				"请求里再传同名字段且取值不同会 400。", a.Resolution, a.Duration),
+		})
+	}
+}
+
 // modelEntryView 把内部结构翻成对外 JSON：OpenAI 那几个字段必须有，
 // 我们的附加信息放 `aivideomaker` 下面，避免污染标准字段。
 func modelEntryView(m modelInfo) map[string]any {
@@ -113,6 +140,9 @@ func modelEntryView(m modelInfo) map[string]any {
 	}
 	if len(m.Durations) > 0 {
 		extra["durations"] = m.Durations
+	}
+	if len(m.DurationsByResolution) > 0 {
+		extra["durations_by_resolution"] = m.DurationsByResolution
 	}
 	out["aivideomaker"] = extra
 	return out
