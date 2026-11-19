@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -328,5 +329,103 @@ func TestDebugPlanNeverSubmits(t *testing.T) {
 	}
 	if submitted != 0 {
 		t.Error("dry-run must never submit")
+	}
+}
+
+// 总览必须回答两个运维问题：今天跑得怎么样、现在能不能接单。
+func TestOverviewReportsTodayAndReadiness(t *testing.T) {
+	h, st := newPanel(t, "")
+	now := time.Now().UnixMilli()
+	_ = st.Put(&store.Entry{ID: "ok-1", Model: "minimaxH3", Status: "succeeded", Account: "acc1", CreatedAtMs: now})
+	_ = st.Put(&store.Entry{ID: "bad-submit", Model: "minimaxH3", Status: "failed", Account: "acc1",
+		CreatedAtMs: now, SubmitErrorCode: "SubmissionFailed",
+		SubmitError: "ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"})
+	_ = st.Put(&store.Entry{ID: "bad-runtime", Model: "minimaxH3", Status: "failed", Account: "acc1", CreatedAtMs: now})
+
+	code, out := panelDo(t, h, http.MethodGet, "/panel/api/overview", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (%v)", code, out)
+	}
+	today, _ := out["today"].(map[string]any)
+	if today == nil {
+		t.Fatal("overview must carry a `today` block")
+	}
+	if got := fmt.Sprint(today["succeeded"]); got != "1" {
+		t.Errorf("today.succeeded = %s, want 1", got)
+	}
+	if got := fmt.Sprint(today["failed"]); got != "2" {
+		t.Errorf("today.failed = %s, want 2", got)
+	}
+
+	// 提交期失败与运行期失败必须分开归因：前者有码，后者只能归 RuntimeFailure。
+	byCode, _ := today["fail_by_code"].(map[string]any)
+	if byCode["SubmissionFailed"] == nil || byCode["RuntimeFailure"] == nil {
+		t.Errorf("fail_by_code must separate submit-time and runtime failures, got %v", byCode)
+	}
+
+	// 内部归因（含上游 procedure 名）只出现在面板，供运维直接定位。
+	reasons, _ := out["fail_reasons"].([]any)
+	if len(reasons) == 0 {
+		t.Fatal("fail_reasons must not be empty")
+	}
+	found := false
+	for _, raw := range reasons {
+		r, _ := raw.(map[string]any)
+		if sample, _ := r["sample"].(string); strings.Contains(sample, "MINIMAX_H3_FREE_DAILY_LIMIT") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("fail_reasons must carry the internal attribution sample, got %v", reasons)
+	}
+
+	// 可用性四分类必须齐全（数值可能为 0，但键要在）。
+	for _, key := range []string{"accounts_ready", "accounts_cooling", "accounts_gated", "accounts_disabled"} {
+		if _, ok := out[key]; !ok {
+			t.Errorf("overview missing %q", key)
+		}
+	}
+}
+
+// 任务列表要能按状态/账号过滤，并带上内部归因（面板排障用）。
+func TestTasksFilterAndCarryInternalReason(t *testing.T) {
+	h, st := newPanel(t, "")
+	now := time.Now().UnixMilli()
+	_ = st.Put(&store.Entry{ID: "f-1", Model: "minimaxH3", Status: "failed", Account: "a1",
+		CreatedAtMs: now, SubmitErrorCode: "SubmissionFailed",
+		SubmitError: "ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"})
+	_ = st.Put(&store.Entry{ID: "s-1", Model: "minimaxH3", Status: "succeeded", Account: "a2", CreatedAtMs: now})
+
+	code, out := panelDo(t, h, http.MethodGet, "/panel/api/tasks?status=failed", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (%v)", code, out)
+	}
+	rows, _ := out["tasks"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("status=failed returned %d rows, want 1 (%v)", len(rows), rows)
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["id"] != "f-1" {
+		t.Errorf("id = %v, want f-1", row["id"])
+	}
+	if got, _ := row["submit_error"].(string); !strings.Contains(got, "MINIMAX_H3_FREE_DAILY_LIMIT") {
+		t.Errorf("submit_error = %q, must carry the internal attribution", got)
+	}
+
+	// 账号过滤
+	_, out = panelDo(t, h, http.MethodGet, "/panel/api/tasks?account=a2", "")
+	rows, _ = out["tasks"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("account=a2 returned %d rows, want 1", len(rows))
+	}
+	if row, _ := rows[0].(map[string]any); row["id"] != "s-1" {
+		t.Errorf("account filter picked %v, want s-1", row["id"])
+	}
+
+	// active 是 queued+running 的别名：预置的 cgt-1 是 queued，应命中。
+	_, out = panelDo(t, h, http.MethodGet, "/panel/api/tasks?status=active", "")
+	rows, _ = out["tasks"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("status=active returned %d rows, want 1 (the queued seed task)", len(rows))
 	}
 }

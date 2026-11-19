@@ -265,6 +265,71 @@ func (s *Store) CountCharged() int {
 	return n
 }
 
+// Stats 是面板总览用的**只读聚合**（锁内遍历，不克隆 Entry）。
+//
+// 单独成方法而不是让面板 List 全量再自己数：List 会 Clone 每一条，
+// 总览每 5 秒刷一次，几千条克隆是纯浪费。
+type Stats struct {
+	Since        int64             `json:"since_ms"`
+	Total        int               `json:"total"`
+	Succeeded    int               `json:"succeeded"`
+	Failed       int               `json:"failed"`
+	Running      int               `json:"running"`
+	ByAccount    map[string]int    `json:"by_account"` // 账号 → 成功条数
+	FailedByAcct map[string]int    `json:"failed_by_account"`
+	FailByCode   map[string]int    `json:"fail_by_code"`
+	FailSample   map[string]string `json:"fail_sample"` // code → 一条内部归因（面板排障用）
+}
+
+// StatsSince 统计 startMs 之后创建的记录。
+func (s *Store) StatsSince(startMs int64) Stats {
+	out := Stats{
+		Since: startMs, ByAccount: map[string]int{}, FailedByAcct: map[string]int{},
+		FailByCode: map[string]int{}, FailSample: map[string]string{},
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.entries {
+		if e.CreatedAtMs < startMs {
+			continue
+		}
+		out.Total++
+		switch e.Status {
+		case "succeeded":
+			out.Succeeded++
+			if e.Account != "" {
+				out.ByAccount[e.Account]++
+			}
+		case "failed", "cancelled", "expired":
+			out.Failed++
+			if e.Account != "" {
+				out.FailedByAcct[e.Account]++
+			}
+			// 提交期失败带 SubmitErrorCode；已提交后失败（审核/超时）没有码 ——
+			// 归成 RuntimeFailure 比混进 Unknown 更能说明"失败发生在哪个相位"。
+			code := e.SubmitErrorCode
+			if code == "" {
+				code = "RuntimeFailure"
+			}
+			out.FailByCode[code]++
+			if _, seen := out.FailSample[code]; !seen && e.SubmitError != "" {
+				out.FailSample[code] = clipText(e.SubmitError, 180)
+			}
+		default:
+			out.Running++
+		}
+	}
+	return out
+}
+
+// clipText 截断到 n 个字符（按字节），用于面板展示的内部归因。
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 func (s *Store) Count(owner string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

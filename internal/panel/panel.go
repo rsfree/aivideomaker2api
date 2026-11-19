@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -214,14 +215,53 @@ func (p *panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (p *panel) handleOverview(w http.ResponseWriter) {
 	views := p.deps.Pool.Snapshot()
+	now := time.Now()
+	// 「今日」按**本机时区**切日：运维看的是"今天跑得怎么样"，不是 UTC 日。
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UnixMilli()
+	stats := p.deps.Store.StatsSince(dayStart)
+
 	inUse, capacity, enabled := 0, 0, 0
+	ready, cooling, gated := 0, 0, 0
 	for _, v := range views {
 		inUse += v.InUse
 		capacity += v.Capacity
-		if v.Enabled {
-			enabled++
+		if !v.Enabled {
+			continue
+		}
+		enabled++
+		// 判定顺序：冷却 → 闸门 → 可用。冷却中的号即使闸门开了也发不出去，
+		// 反过来闸门挡着的号即使不冷却也过不去 —— 两者要分开计数，修法不同。
+		switch {
+		case v.CooldownUntilMs > now.UnixMilli():
+			cooling++
+		case v.CaptchaUntilMs > now.UnixMilli():
+			gated++
+		default:
+			ready++
 		}
 	}
+
+	// 失败归因：按次数降序取前 5。sample 是**内部归因**（如 `ai.minimaxH3: XXX`），
+	// 只出现在面板里，公开 API 的 message 仍走脱敏口径。
+	type reason struct {
+		Code   string `json:"code"`
+		Count  int    `json:"count"`
+		Sample string `json:"sample,omitempty"`
+	}
+	reasons := make([]reason, 0, len(stats.FailByCode))
+	for code, n := range stats.FailByCode {
+		reasons = append(reasons, reason{Code: code, Count: n, Sample: stats.FailSample[code]})
+	}
+	sort.Slice(reasons, func(i, j int) bool {
+		if reasons[i].Count != reasons[j].Count {
+			return reasons[i].Count > reasons[j].Count
+		}
+		return reasons[i].Code < reasons[j].Code
+	})
+	if len(reasons) > 5 {
+		reasons = reasons[:5]
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service":          p.deps.ServiceName,
 		"version":          p.deps.Version,
@@ -230,14 +270,21 @@ func (p *panel) handleOverview(w http.ResponseWriter) {
 		"uptime_sec":       int(time.Since(p.deps.Started).Seconds()),
 		"accounts_total":   len(views),
 		"accounts_enabled": enabled,
-		"slots_in_use":     inUse,
-		"slots_capacity":   capacity,
-		"tasks":            p.deps.Store.Count(""),
-		"tasks_charged":    p.deps.Store.CountCharged(),
-		"task_store":       p.deps.Store.Describe(),
-		"media_enabled":    p.deps.MediaEnabled,
-		"probe_interval":   p.deps.ProbeInterval.String(),
-		"now":              time.Now().Format(time.RFC3339),
+		// 四个可判定计数：ops 一眼就知道"现在能不能跑、卡在哪一类"。
+		"accounts_ready":    ready,
+		"accounts_cooling":  cooling,
+		"accounts_gated":    gated,
+		"accounts_disabled": len(views) - enabled,
+		"slots_in_use":      inUse,
+		"slots_capacity":    capacity,
+		"today":             stats,
+		"fail_reasons":      reasons,
+		"tasks":             p.deps.Store.Count(""),
+		"tasks_charged":     p.deps.Store.CountCharged(),
+		"task_store":        p.deps.Store.Describe(),
+		"media_enabled":     p.deps.MediaEnabled,
+		"probe_interval":    p.deps.ProbeInterval.String(),
+		"now":               time.Now().Format(time.RFC3339),
 	})
 }
 
@@ -493,10 +540,17 @@ func (p *panel) handleTasks(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	entries := p.deps.Store.List(limit, 0, "")
-	rows := make([]map[string]any, 0, len(entries))
-	for _, e := range entries {
-		warnings := len(e.Warnings)
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	account := strings.TrimSpace(r.URL.Query().Get("account"))
+
+	rows := make([]map[string]any, 0, limit)
+	for _, e := range p.deps.Store.List(0, 0, "") {
+		if !matchesTaskStatus(e.Status, status) {
+			continue
+		}
+		if account != "" && !strings.EqualFold(e.Account, account) {
+			continue
+		}
 		// `paid` 是**三态**：true（确认扣费）/ false（确认免费）/ nil（未到终态、还不知道）。
 		// 把 nil 画成 false 等于声称"这次不花钱"—— 那是替上游撒谎，面板上必须区分。
 		var paid any
@@ -511,14 +565,47 @@ func (p *panel) handleTasks(w http.ResponseWriter, r *http.Request) {
 			"id": e.ID, "model": e.Model, "status": e.Status,
 			"account": e.Account, "upstream_task": e.TaskID,
 			"created_at": time.UnixMilli(e.CreatedAtMs).Format("01-02 15:04:05"),
-			"shape":      e.Shape, "warnings": warnings,
+			"shape":      e.Shape, "warnings": len(e.Warnings),
 			"error": e.SubmitErrorCode,
 			// 名字带 upstream_ 前缀是刻意的：这个 `credits` 与 `paid` **反相**
 			// （免费任务记 1、扣费任务记 0），谁把它当金额读都会读反。
 			"paid": paid, "upstream_credits": credits,
+			// 下面是**面板专用**的内部归因（含上游 procedure 名）。公开 API 的
+			// message 仍走脱敏口径 —— 两处不能混，面板是登录后的运维界面。
+			"submit_error": clipPanel(e.SubmitError, 300),
+			"submit_hint":  e.SubmitErrorHint,
+			"submit_quote": e.SubmitErrorQuote,
 		})
+		if len(rows) >= limit {
+			break
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": rows})
+}
+
+// matchesTaskStatus 支持三类别名 + 精确匹配。
+//   - active → queued/running（"还在路上"）
+//   - failed → failed/cancelled/expired（"终态不是成功"）
+func matchesTaskStatus(status, want string) bool {
+	if want == "" {
+		return true
+	}
+	status = strings.ToLower(status)
+	switch want {
+	case "active":
+		return status == "queued" || status == "running"
+	case "failed":
+		return status == "failed" || status == "cancelled" || status == "expired"
+	}
+	return status == want
+}
+
+// clipPanel 截断面板展示的内部归因（按字节），避免一条超长上游报文撑爆表格。
+func clipPanel(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ---- 会话 ----

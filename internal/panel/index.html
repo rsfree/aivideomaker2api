@@ -32,7 +32,8 @@
   </div>
   <ul>
     <li class="nav-h">运营</li>
-    <li><a href="#accounts" data-view="accounts" class="on">账号池</a></li>
+    <li><a href="#overview" data-view="overview" class="on">总览</a></li>
+    <li><a href="#accounts" data-view="accounts">账号池</a></li>
     <li><a href="#tasks" data-view="tasks">任务中心</a></li>
     <li class="nav-h">观测</li>
     <li><a href="#usage" data-view="usage">用量</a></li>
@@ -44,7 +45,33 @@
   </ul>
 </nav>
 <main class="wrap">
-<section class="view" id="view-accounts">
+<section class="view" id="view-overview">
+  <section class="cards" id="ovKpis" aria-label="今日指标"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>可用性</h2>
+      <div class="panel-actions"><span id="ovVerdict" class="verdict">—</span></div>
+    </div>
+    <div class="health-bar" id="ovHealth"></div>
+    <p class="hint">判定顺序：<strong>停用 → 冷却 → 闸门 → 可用</strong>。三类互斥，数量之和等于启用账号数；
+      点「账号池」可逐号看原因。</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>今日失败归因</h2></div>
+    <div class="table-wrap">
+      <table id="ovReasons">
+        <thead><tr><th>归因码</th><th class="num">次数</th><th>内部归因（仅面板可见）</th></tr></thead>
+        <tbody id="ovReasonsBody"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">归因码来自提交期的 <code>SubmitErrorCode</code>；<code>RuntimeFailure</code> 表示请求已提交、
+      在运行期失败（审核 / 超时等），两者修法不同。</p>
+  </section>
+</section>
+
+<section class="view hidden" id="view-accounts">
   <section class="cards" id="cards" aria-label="总览"></section>
 
   <section class="panel">
@@ -93,10 +120,11 @@
         <thead>
           <tr>
             <th>账号</th><th>状态</th><th class="num">余额</th><th>套餐 / 额度</th>
-            <th>闸门</th><th class="num">在跑</th><th>最近探测</th><th>操作</th>
+            <th>闸门</th><th class="num">今日成功</th><th class="num">在跑</th>
+            <th class="num">失败</th><th>最近探测</th><th>操作</th>
           </tr>
         </thead>
-        <tbody id="accountsBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+        <tbody id="accountsBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
     <p class="hint">凭据只落在 <code>auths/*.json</code>（0600），从不进日志与响应体；这里只显示掩码。</p>
@@ -109,6 +137,19 @@
     <div class="panel-head">
       <h2>任务</h2>
       <div class="panel-actions">
+        <label class="select">
+          状态
+          <select id="taskStatus">
+            <option value="">全部</option>
+            <option value="active">在跑 / 排队</option>
+            <option value="succeeded">完成</option>
+            <option value="failed">失败</option>
+          </select>
+        </label>
+        <label class="select">
+          账号
+          <input id="taskAccount" placeholder="精确账号名" size="14">
+        </label>
         <label class="select">
           条数
           <select id="taskLimit">
@@ -123,9 +164,10 @@
     <div class="table-wrap">
       <table id="tasksTable">
         <thead>
-          <tr><th>任务 id</th><th>模型</th><th>状态</th><th>扣费</th><th>账号</th><th>上游任务</th><th>创建</th><th class="num">告警</th></tr>
+          <tr><th>任务 id</th><th>模型</th><th>状态</th><th>失败原因</th><th>扣费</th>
+              <th>账号</th><th>上游任务</th><th>创建</th><th class="num">告警</th></tr>
         </thead>
-        <tbody id="tasksBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+        <tbody id="tasksBody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
     <p class="hint">列表是<strong>本地记录</strong>（不打上游）；逐条查询才是权威口径。站点没有取消端点，跑着的任务照跑照扣。</p>

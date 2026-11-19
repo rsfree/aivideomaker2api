@@ -111,18 +111,23 @@ type View struct {
 	CookieMasked string `json:"cookie_masked"`
 	Credits      *int   `json:"credits"`
 	// Email/UserID 只是**展示与去重**用的身份信息，不含任何凭据。
-	Email         string         `json:"email,omitempty"`
-	UserID        string         `json:"user_id,omitempty"`
-	Plan          string         `json:"plan,omitempty"`
-	Limit         int            `json:"limit"`
-	Captcha       *bool          `json:"captcha"`
-	Reachable     bool           `json:"reachable"`
-	LastProbe     string         `json:"last_probe,omitempty"`
-	LastError     string         `json:"last_error,omitempty"`
-	CooldownUntil string         `json:"cooldown_until,omitempty"`
-	InUse         int            `json:"in_use"`
-	Capacity      int            `json:"capacity"`
-	Queue         upstream.Stats `json:"queue"`
+	Email         string `json:"email,omitempty"`
+	UserID        string `json:"user_id,omitempty"`
+	Plan          string `json:"plan,omitempty"`
+	Limit         int    `json:"limit"`
+	Captcha       *bool  `json:"captcha"`
+	Reachable     bool   `json:"reachable"`
+	LastProbe     string `json:"last_probe,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+	FailCount     int    `json:"fail_count"`
+	CooldownUntil string `json:"cooldown_until,omitempty"`
+	// CooldownUntilMs / CaptchaUntilMs 是给面板算「现在能不能用」的机器可读值：
+	// 只给 RFC3339 字符串的话，前端要为时区/格式写一遍解析，还容易解析失败。
+	CooldownUntilMs int64          `json:"cooldown_until_ms,omitempty"`
+	CaptchaUntilMs  int64          `json:"captcha_until_ms,omitempty"`
+	InUse           int            `json:"in_use"`
+	Capacity        int            `json:"capacity"`
+	Queue           upstream.Stats `json:"queue"`
 }
 
 // Pool 是账号集合。
@@ -797,6 +802,9 @@ func (p *Pool) Snapshot() []View {
 		if st.CooldownUntil > 0 {
 			v.CooldownUntil = time.UnixMilli(st.CooldownUntil).Format(time.RFC3339)
 		}
+		v.FailCount = st.FailCount
+		v.CooldownUntilMs = st.CooldownUntil
+		v.CaptchaUntilMs = st.CaptchaUntilMs
 		out = append(out, v)
 	}
 	return out

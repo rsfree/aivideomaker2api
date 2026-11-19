@@ -21,6 +21,9 @@ const state = {
   requiresPassword: false,
   authed: true,
   busy: false,
+  overview: null,
+  accounts: [],
+  tasks: [],
 };
 
 // ---------------------------------------------------------------- 小工具 --
@@ -93,13 +96,15 @@ function renderCards(overview) {
     ])));
 }
 
-function accountRow(acc) {
+function accountRow(acc, todayByAccount) {
   const enabledBadge = acc.enabled ? badge('启用', 'ok') : badge('停用', 'neutral');
   const credits = acc.credits == null ? '—' : String(acc.credits);
   const plan = [acc.plan || '未知套餐', acc.limit ? '额度 ' + acc.limit : '额度自动'].join(' · ');
   const gate = acc.captcha == null ? '—' : (acc.captcha ? badge('需过闸门', 'warn') : '关闭');
   const running = String(acc.in_use) + ' / ' + String(acc.capacity);
   const probed = acc.last_probe ? new Date(acc.last_probe).toLocaleTimeString() : '—';
+  const todayOk = (todayByAccount && todayByAccount[acc.name]) || 0;
+  const fails = acc.fail_count || 0;
 
   const actions = el('td', { dataset: { label: '操作' } }, [
     el('button', {
@@ -130,20 +135,24 @@ function accountRow(acc) {
     el('td', { class: 'num', dataset: { label: '余额' }, text: credits }),
     el('td', { dataset: { label: '套餐 / 额度' }, text: plan }),
     el('td', { dataset: { label: '闸门' } }, [typeof gate === 'string' ? document.createTextNode(gate) : gate]),
+    el('td', { class: 'num', dataset: { label: '今日成功' }, text: String(todayOk) }),
     el('td', { class: 'num', dataset: { label: '在跑' }, text: running }),
+    el('td', { class: 'num', dataset: { label: '失败' } }, [
+      fails > 0 ? badge(String(fails), 'warn') : el('span', { class: 'muted', text: '0' }),
+    ]),
     el('td', { class: 'nowrap', dataset: { label: '最近探测' }, text: probed }),
     actions,
   ];
   return el('tr', {}, cells);
 }
 
-function renderAccounts(accounts) {
+function renderAccounts(accounts, todayByAccount) {
   const body = document.getElementById('accountsBody');
   if (!accounts.length) {
-    body.replaceChildren(el('tr', {}, [el('td', { colspan: '8', class: 'empty', text: '还没有账号 —— 点右上「添加账号」，或把 auths/*.json 放进去' })]));
+    body.replaceChildren(el('tr', {}, [el('td', { colspan: '10', class: 'empty', text: '还没有账号 —— 点右上「添加账号」，或把 auths/*.json 放进去' })]));
     return;
   }
-  body.replaceChildren(...accounts.map(accountRow));
+  body.replaceChildren(...accounts.map((acc) => accountRow(acc, todayByAccount)));
 }
 
 function taskRow(task) {
@@ -151,10 +160,8 @@ function taskRow(task) {
   return el('tr', {}, [
     el('td', { class: 'mono', dataset: { label: '任务 id' }, text: task.id }),
     el('td', { dataset: { label: '模型' }, text: task.model || '—' }),
-    el('td', { dataset: { label: '状态' } }, [
-      badge(text, tone),
-      task.error ? el('span', { class: 'muted', text: ' ' + task.error }) : null,
-    ]),
+    el('td', { dataset: { label: '状态' } }, [badge(text, tone)]),
+    failureCell(task),
     billingCell(task),
     el('td', { class: 'mono', dataset: { label: '账号' }, text: task.account || '—' }),
     el('td', { class: 'mono', dataset: { label: '上游任务' }, text: task.upstream_task || '—' }),
@@ -188,10 +195,120 @@ function billingCell(task) {
 function renderTasks(tasks) {
   const body = document.getElementById('tasksBody');
   if (!tasks.length) {
-    body.replaceChildren(el('tr', {}, [el('td', { colspan: '8', class: 'empty', text: '还没有任务' })]));
+    body.replaceChildren(el('tr', {}, [el('td', { colspan: '9', class: 'empty', text: '还没有任务' })]));
     return;
   }
   body.replaceChildren(...tasks.map(taskRow));
+}
+
+// failureCell 画"为什么失败"。
+//
+// 归因码（error）是对外契约；submit_error 是**内部归因**（含上游 procedure 名），
+// 只在这里展示 —— 面板是登录后的运维界面，与公开 API 的脱敏口径不冲突。
+function failureCell(task) {
+  const td = el('td', { dataset: { label: '失败原因' } });
+  const terminalFail = task.status === 'failed' || task.status === 'cancelled' || task.status === 'expired';
+  if (!terminalFail) {
+    td.append(el('span', { class: 'muted', text: '—' }));
+    return td;
+  }
+  td.append(badge(task.error || 'RuntimeFailure', 'bad'));
+  if (task.submit_error) {
+    td.append(el('div', { class: 'muted trunc', text: task.submit_error, title: task.submit_error }));
+  }
+  if (task.submit_hint) {
+    td.append(el('div', { class: 'muted trunc', text: task.submit_hint, title: task.submit_hint }));
+  }
+  return td;
+}
+
+// ---------------------------------------------------------------- 总览 --
+
+function renderOverview(overview, tasks, accounts) {
+  if (!overview) return;
+  const today = overview.today || {};
+  const total = today.total || 0;
+  const ok = today.succeeded || 0;
+  const failed = today.failed || 0;
+  const rate = total ? Math.round((failed * 100) / total) : 0;
+
+  const kpis = [
+    { label: '今日提交', value: String(total), sub: '本机时区零点起', filter: '' },
+    { label: '成功', value: String(ok), sub: total ? Math.round((ok * 100) / total) + '% 成功率' : '今日暂无', filter: 'succeeded' },
+    { label: '失败', value: String(failed), sub: rate + '% 失败率', filter: 'failed' },
+    { label: '可用账号', value: String(overview.accounts_ready || 0) + ' / ' + String(overview.accounts_total || 0), sub: '非冷却 · 非闸门 · 已启用', filter: 'accounts' },
+  ];
+  const box = document.getElementById('ovKpis');
+  box.replaceChildren(...kpis.map((k) => el('div', {
+    class: 'card clickable',
+    role: 'button',
+    tabindex: '0',
+    title: '点击查看对应明细',
+    onclick: () => jumpToFilter(k.filter),
+    onkeydown: (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); jumpToFilter(k.filter); }
+    },
+  }, [
+    el('div', { class: 'label', text: k.label }),
+    el('div', { class: 'value', text: k.value }),
+    el('div', { class: 'sub', text: k.sub }),
+  ])));
+
+  renderHealth(overview);
+  renderReasons(overview.fail_reasons || []);
+}
+
+// jumpToFilter 是 KPI 卡的动作：把"数字"变成"可查看的清单"。
+function jumpToFilter(filter) {
+  if (filter === 'accounts') { location.hash = '#accounts'; return; }
+  location.hash = '#tasks';
+  const sel = document.getElementById('taskStatus');
+  if (sel) sel.value = filter || '';
+  refresh(true);
+}
+
+function renderHealth(o) {
+  const items = [
+    ['可用', o.accounts_ready || 0, 'ok'],
+    ['冷却', o.accounts_cooling || 0, 'warn'],
+    ['闸门', o.accounts_gated || 0, 'warn'],
+    ['停用', o.accounts_disabled || 0, 'neutral'],
+  ];
+  document.getElementById('ovHealth').replaceChildren(...items.map(([label, n, tone]) =>
+    el('div', { class: 'health-item ' + tone }, [
+      el('span', { class: 'n', text: String(n) }),
+      el('span', { class: 't', text: label }),
+    ])));
+
+  const verdict = document.getElementById('ovVerdict');
+  const enabled = o.accounts_enabled || 0;
+  const ready = o.accounts_ready || 0;
+  if (!enabled) {
+    verdict.textContent = '不可用：没有启用的账号';
+    verdict.className = 'verdict bad';
+  } else if (!ready) {
+    verdict.textContent = '降级：启用的账号全部冷却或被闸门挡住';
+    verdict.className = 'verdict bad';
+  } else if (ready < enabled) {
+    verdict.textContent = '部分可用：' + ready + ' / ' + enabled;
+    verdict.className = 'verdict warn';
+  } else {
+    verdict.textContent = '可接单';
+    verdict.className = 'verdict ok';
+  }
+}
+
+function renderReasons(reasons) {
+  const body = document.getElementById('ovReasonsBody');
+  if (!reasons.length) {
+    body.replaceChildren(el('tr', {}, [el('td', { colspan: '3', class: 'empty', text: '今日没有失败' })]));
+    return;
+  }
+  body.replaceChildren(...reasons.map((r) => el('tr', {}, [
+    el('td', {}, [badge(r.code, 'bad')]),
+    el('td', { class: 'num', text: String(r.count) }),
+    el('td', { class: 'muted mono trunc', text: r.sample || '—', title: r.sample || '' }),
+  ])));
 }
 
 // ---------------------------------------------------------------- 加载 --
@@ -224,10 +341,13 @@ async function refresh(silent) {
   state.busy = true;
   try {
     const [overview, accounts] = await Promise.all([loadOverview(), api('accounts')]);
-    renderAccounts(accounts.accounts || []);
-    const limit = document.getElementById('taskLimit').value;
-    const tasks = await api('tasks?limit=' + encodeURIComponent(limit));
-    renderTasks(tasks.tasks || []);
+    state.overview = overview;
+    state.accounts = accounts.accounts || [];
+    const tasks = await api(taskQuery());
+    state.tasks = tasks.tasks || [];
+    renderAccounts(state.accounts, (overview.today || {}).by_account || {});
+    renderTasks(state.tasks);
+    renderOverview(overview, state.tasks, state.accounts);
     document.getElementById('logoutBtn').classList.toggle('hidden', !state.requiresPassword);
     if (!silent) toast('已刷新');
   } catch (err) {
@@ -253,6 +373,23 @@ document.getElementById('addToggle').addEventListener('click', () => {
   document.getElementById('addForm').classList.toggle('hidden');
 });
 document.getElementById('taskLimit').addEventListener('change', () => refresh(true));
+document.getElementById('taskStatus').addEventListener('change', () => refresh(true));
+let accountFilterTimer = null;
+document.getElementById('taskAccount').addEventListener('input', () => {
+  clearTimeout(accountFilterTimer);
+  accountFilterTimer = setTimeout(() => refresh(true), 400);
+});
+
+// taskQuery 把三个筛选控件拼成一个请求（后端做过滤，不在前端截断）。
+function taskQuery() {
+  const params = new URLSearchParams();
+  params.set('limit', document.getElementById('taskLimit').value);
+  const status = document.getElementById('taskStatus').value;
+  if (status) params.set('status', status);
+  const account = document.getElementById('taskAccount').value.trim();
+  if (account) params.set('account', account);
+  return 'tasks?' + params.toString();
+}
 
 document.getElementById('addForm').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -363,11 +500,11 @@ document.getElementById('loginForm').addEventListener('submit', async (event) =>
 //
 // 目录结构对齐 workbuddy2api：运营（账号池 / 任务中心）、观测（用量 / 闸门）、
 // 配置（官方 API / 配置）。用 hash 路由，刷新后停在原页面。
-const VIEWS = ['accounts', 'tasks', 'usage', 'limits', 'official', 'debug', 'config'];
+const VIEWS = ['overview', 'accounts', 'tasks', 'usage', 'limits', 'official', 'debug', 'config'];
 
 function currentView() {
-  const v = (location.hash || '#accounts').replace('#', '');
-  return VIEWS.includes(v) ? v : 'accounts';
+  const v = (location.hash || '#overview').replace('#', '');
+  return VIEWS.includes(v) ? v : 'overview';
 }
 
 function route() {
@@ -378,6 +515,7 @@ function route() {
   }
   document.querySelectorAll('.sidenav a[data-view]').forEach((a) =>
     a.classList.toggle('on', a.dataset.view === active));
+  if (active === 'overview') renderOverview(state.overview, state.tasks, state.accounts);
   if (active === 'usage') renderUsage();
   if (active === 'limits') renderLimits();
   if (active === 'official') renderOfficial();
