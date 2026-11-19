@@ -588,3 +588,23 @@ func TestQuotaCooldownBounds(t *testing.T) {
 		t.Errorf("floor violated: %v", got)
 	}
 }
+
+// 停用号不能让"最早恢复时间"归零 —— 否则 429 永远给不出 Retry-After。
+func TestEarliestRecoveryIgnoresDisabledAccounts(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "active", "disabled-one")
+
+	// 停用一个号（它的 CooldownUntil 恒为 0）。
+	disabled := false
+	if err := p.SetEnabled("disabled-one", disabled); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	// 让唯一的启用号进入 2h 额度冷却。
+	p.ReportFailure("active", errors.New("ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"))
+
+	wait := p.EarliestRecovery()
+	if wait <= time.Hour {
+		t.Errorf("EarliestRecovery = %v, want the active account's cooldown (>=1h); "+
+			"a disabled account must not zero it out", wait)
+	}
+}

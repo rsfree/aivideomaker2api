@@ -786,6 +786,12 @@ func earliestRecovery(accounts []*Account) time.Duration {
 	now := time.Now()
 	best := time.Duration(0)
 	for _, acc := range accounts {
+		// 🔴 **停用号不参与**：它们的 CooldownUntil 恒为 0，参与比较会让"还有号要等"
+		// 被误判成"现在就有号可用"（return 0）。生产实测：6 个号里 4 个停用、2 个在冷却，
+		// 429 的 Retry-After 因此一直是空的 —— 客户端没有任何等待依据。
+		if !acc.Enabled {
+			continue
+		}
 		acc.mu.RLock()
 		until := acc.state.CooldownUntil
 		acc.mu.RUnlock()
