@@ -608,3 +608,59 @@ func TestEarliestRecoveryIgnoresDisabledAccounts(t *testing.T) {
 			"a disabled account must not zero it out", wait)
 	}
 }
+
+// 探测成功不能抹掉"冷却原因"：余额可读 ≠ 免费额度没用完。
+func TestProbeKeepsCooldownReason(t *testing.T) {
+	mux := http.NewServeMux()
+	env := func(w http.ResponseWriter, v any) {
+		w.Header().Set("content-type", "application/json")
+		raw, _ := json.Marshal([]any{map[string]any{"result": map[string]any{"data": map[string]any{"json": v}}}})
+		_, _ = w.Write(raw)
+	}
+	mux.HandleFunc("/api/auth.user", func(w http.ResponseWriter, r *http.Request) {
+		env(w, map[string]any{"id": "u1", "email": "a@example.com"})
+	})
+	mux.HandleFunc("/api/credits.getCredits", func(w http.ResponseWriter, r *http.Request) {
+		env(w, map[string]any{"totalRemaining": 4554})
+	})
+	mux.HandleFunc("/api/ai.queryUserPermission", func(w http.ResponseWriter, r *http.Request) {
+		env(w, map[string]any{"maxQueueLength": 4, "planName": "pro"})
+	})
+	mux.HandleFunc("/api/model.needsCaptcha", func(w http.ResponseWriter, r *http.Request) {
+		env(w, false)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	raw, _ := json.Marshal(Spec{Name: "acc1", Cookie: "auth_session=test-session-acc1"})
+	if err := os.WriteFile(filepath.Join(dir, "acc1.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Options{
+		AuthDir: dir, MaxInFlight: 2, AcquireTimeout: 300 * time.Millisecond,
+		Upstream: upstream.Config{BaseURL: srv.URL, TrustEnv: false,
+			Timeout: 2 * time.Second, ProbeTimeout: time.Second},
+	}, t.Logf)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(p.Close)
+
+	p.ReportFailure("acc1", errors.New("ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"))
+	if err := p.Probe(context.Background(), "acc1"); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	for _, v := range p.Snapshot() {
+		if v.Name != "acc1" {
+			continue
+		}
+		if !strings.Contains(v.LastError, "额度") {
+			t.Errorf("last_error = %q, want the cooldown reason to survive a successful probe", v.LastError)
+		}
+		if v.CooldownUntilMs <= time.Now().UnixMilli() {
+			t.Error("cooldown should still be active")
+		}
+	}
+}

@@ -402,7 +402,12 @@ func (p *Pool) Probe(ctx context.Context, name string) error {
 		acc.state.Credits = credits
 		acc.state.HasCredits = true
 		acc.state.Reachable = true
-		acc.state.LastError = ""
+		// 冷却中的号**保留**导致冷却的原因：探测能读到余额，不等于额度没耗尽
+		// （余额与免费日额度是两个维度）。清掉它会让面板上一个"正在冷却 2 小时"
+		// 的号看不出任何原因 —— 生产实测：me 被额度冷却后 5 分钟内提示就消失了。
+		if acc.state.CooldownUntil <= time.Now().UnixMilli() {
+			acc.state.LastError = ""
+		}
 	}
 	acc.state.LastProbeMs = time.Now().UnixMilli()
 	acc.mu.Unlock()

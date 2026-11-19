@@ -78,11 +78,22 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 	// 若上游后续证明 CDN 链接是账号级的，这里要改成"每次换号重传"。
 	params := plan.WebParams
 	rehosted := false
+	// quotaNotes 收集换号过程中的**真实原因**。最后那次失败往往是
+	// "all enabled accounts are cooling down"—— 那是结果，不是原因；
+	// 不把前面的原因带上，面板上就只剩一句无用的结论（生产截图暴露）。
+	var quotaNotes []string
+	// withQuotaCause 把换号过程中的原因挂到最终错误上（%w 保留原链，对外码不变）。
+	withQuotaCause := func(err error) error {
+		if len(quotaNotes) == 0 {
+			return err
+		}
+		return fmt.Errorf("%w — quota exhausted on %s", err, strings.Join(quotaNotes, "; "))
+	}
 
 	for attempt := 0; ; attempt++ {
 		account, err := s.pool.Acquire(ctx)
 		if err != nil {
-			s.markFailed(entry.ID, err)
+			s.markFailed(entry.ID, withQuotaCause(err))
 			return
 		}
 		// 账号在**占槽成功之后**立刻写回记录：提交失败时面板与日志里也能看出是哪个号试过。
@@ -121,13 +132,15 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 			// 本次请求换下一个号再试 —— 调用方看不到这个中间态。
 			// 其余错误保持"一次就失败"：宁可少救，不可多扣（超时可能已建任务）。
 			if upstream.IsQuotaExhausted(err) && attempt < maxQuotaSwitches && ctx.Err() == nil {
+				quotaNotes = append(quotaNotes, fmt.Sprintf("%s: %v", account.Name, err))
 				s.recordSubmitFailure(entry, "submit", "web", err.Error())
 				s.log.Warn("quota exhausted, switching account",
 					"task", entry.ID, "account", account.Name, "attempt", attempt+1, "err", err)
 				continue
 			}
 
-			s.markFailed(entry.ID, err)
+			// 最终失败：把之前每次撞墙的原因串进错误（%w 保留原链，对外码不变）。
+			s.markFailed(entry.ID, withQuotaCause(err))
 			s.recordSubmitFailure(entry, "submit", "web", err.Error())
 			s.log.Warn("submit failed", "task", entry.ID, "account", account.Name, "err", err)
 			return
@@ -171,6 +184,8 @@ func (s *Server) markFailed(entryID string, err error) {
 	var noAccount *pool.ErrNoAccount
 	if errors.As(err, &noAccount) {
 		code = codeRateLimited
+		// 与 submit_error 不重复：那里已经写清"谁在冷却、为什么"，这里只给动作。
+		hint = "wait for the cooldown shown in the panel, or enable more accounts in the pool"
 	}
 	var upErr *apierr.UpstreamError
 	if errors.As(err, &upErr) {

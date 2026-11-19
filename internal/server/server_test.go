@@ -823,6 +823,15 @@ func TestQuotaExhaustedEverywhereSurfacesAsRateLimit(t *testing.T) {
 		t.Errorf("code = %q, want RateLimitExceeded (retryable, not a parameter error)",
 			entries[0].SubmitErrorCode)
 	}
+	// 🔴 面板的"失败原因"必须能看出**根因**，而不是只有"没有可用账号"这句结果。
+	// 生产截图暴露过：只显示 RateLimitExceeded + all enabled accounts are cooling down，
+	// 真正的 MINIMAX_H3_FREE_DAILY_LIMIT 被换号过程吞掉了。
+	if !strings.Contains(entries[0].SubmitError, "MINIMAX_H3_FREE_DAILY_LIMIT") {
+		t.Errorf("submit_error = %q, must carry the per-account root cause", entries[0].SubmitError)
+	}
+	if entries[0].SubmitErrorHint == "" {
+		t.Error("submit_error_hint should tell the operator where to look")
+	}
 }
 
 // 限流失败的响应必须带 Retry-After —— 否则客户端只会在"反复轮询"和"改参数重投"
