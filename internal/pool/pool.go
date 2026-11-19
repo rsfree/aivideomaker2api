@@ -71,6 +71,10 @@ type State struct {
 	LastError      string `json:"last_error,omitempty"`
 	FailCount      int    `json:"fail_count,omitempty"`
 	CooldownUntil  int64  `json:"cooldown_until_ms,omitempty"`
+	// QuotaHits 是"免费额度耗尽"的累计撞墙次数，决定长冷却的翻倍档位。
+	// 单独一个字段而不是复用 FailCount：额度耗尽与"抖动"的修法完全不同，
+	// 混在一起会让一次网络抖动把额度冷却的档位推高。
+	QuotaHits int `json:"quota_hits,omitempty"`
 }
 
 // Options 是池的构造参数。
@@ -537,6 +541,26 @@ func (p *Pool) ReportFailure(name string, err error) {
 		}
 		return
 	}
+	// 免费额度耗尽：当天不会自愈。给它一个**长冷却**（2h 起步、翻倍、封顶到 UTC 次日
+	// 零点），而不是 30 秒的失败退避 —— 后者只会让它回来再撞一次。
+	if upstream.IsQuotaExhausted(err) {
+		acc, ok := p.Account(name)
+		if !ok {
+			return
+		}
+		acc.mu.Lock()
+		acc.state.QuotaHits++
+		until := quotaCooldown(acc.state.QuotaHits, time.Now())
+		acc.state.CooldownUntil = until.UnixMilli()
+		acc.state.LastError = "免费额度已耗尽（按 UTC 日重置）"
+		hits := acc.state.QuotaHits
+		acc.mu.Unlock()
+		p.logf("[pool] 账号 %s 免费额度耗尽（第 %d 次）⇒ 冷却至 %s",
+			name, hits, until.Format(time.RFC3339))
+		p.saveState()
+		return
+	}
+
 	acc, ok := p.Account(name)
 	if !ok {
 		return
@@ -571,6 +595,34 @@ func (p *Pool) ReportSuccess(name string) {
 	acc.state.Captcha = false
 	acc.state.CaptchaUntilMs = 0
 	acc.mu.Unlock()
+}
+
+// quotaCooldown 是"免费额度耗尽"的冷却时长：2h 起步，每次再撞翻倍（封顶 16h），
+// 但**不超过 UTC 次日 0 点** —— 那是站点额度重置的时刻，比它更久没有意义。
+//
+// 为什么不用 30s 的失败退避：额度耗尽当天不会自愈（实测同一账号连续白撞 4 次，
+// 每次都是一次真实提交机会）。为什么要翻倍：如果额度其实是滚动窗口而非自然日，
+// 2h 后可能已经恢复；翻倍让"确实恢复了"与"仍然耗尽"都能被自动区分。
+func quotaCooldown(hits int, now time.Time) time.Time {
+	d := 2 * time.Hour
+	for i := 1; i < hits && i < 4; i++ {
+		d *= 2
+	}
+	until := now.Add(d)
+	if next := utcMidnightAfter(now); next.Before(until) {
+		until = next
+	}
+	// 保底 15 分钟：离 UTC 零点只剩几分钟时，"刚标记就到期"等于没有冷却。
+	if floor := now.Add(15 * time.Minute); until.Before(floor) {
+		until = floor
+	}
+	return until
+}
+
+// utcMidnightAfter 返回严格大于 now 的下一个 UTC 零点。
+func utcMidnightAfter(now time.Time) time.Time {
+	u := now.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day()+1, 0, 0, 0, 0, time.UTC)
 }
 
 // captchaCooldown 是"撞到闸门后先绕开这个号"的时长。
@@ -713,6 +765,20 @@ func anyEnabled(accounts []*Account) bool {
 		}
 	}
 	return false
+}
+
+// EarliestRecovery 返回"最早一个冷却号还要多久恢复"（0 = 没有在冷却的）。
+//
+// 给 429 的 Retry-After 用：客户端据此**等待**，而不是改参数重发 ——
+// 后者是 429 被误读成 400 时的典型坏行为（越改越远）。
+func (p *Pool) EarliestRecovery() time.Duration {
+	p.mu.RLock()
+	accounts := make([]*Account, 0, len(p.accounts))
+	for _, a := range p.accounts {
+		accounts = append(accounts, a)
+	}
+	p.mu.RUnlock()
+	return earliestRecovery(accounts)
 }
 
 // earliestRecovery 返回"最早一个账号还要冷却多久"（0 = 没有在冷却的）。

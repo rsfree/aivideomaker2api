@@ -70,60 +70,87 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 		return
 	}
 
-	account, err := s.pool.Acquire(ctx)
-	if err != nil {
-		s.markFailed(entry.ID, err)
-		return
-	}
-	// 账号在**占槽成功之后**立刻写回记录：提交失败时面板与日志里也能看出是哪个号试过。
-	// （只在成功时记录会让"失败了但不知道用的哪个号"变成排障死胡同。）
-	if _, patchErr := s.store.Patch(entry.ID, func(e *store.Entry) { e.Account = account.Name }); patchErr != nil {
-		s.log.Warn("persist account binding failed", "task", entry.ID, "err", patchErr)
-	}
+	// 额度耗尽可以在**本次请求内**换号重试：这类错误明确没接单（空 taskId / 429），
+	// 重试零副作用；而池里通常还有别的号。上限 3 次，避免把整池号在一条请求里跑穿。
+	const maxQuotaSwitches = 3
 
-	released := false
-	release := func() {
-		if !released {
-			released = true
-			account.Queue.Release()
+	// 素材只转存一次：上传目标是站点 CDN（全局可读），换号不需要重传。
+	// 若上游后续证明 CDN 链接是账号级的，这里要改成"每次换号重传"。
+	params := plan.WebParams
+	rehosted := false
+
+	for attempt := 0; ; attempt++ {
+		account, err := s.pool.Acquire(ctx)
+		if err != nil {
+			s.markFailed(entry.ID, err)
+			return
 		}
-	}
+		// 账号在**占槽成功之后**立刻写回记录：提交失败时面板与日志里也能看出是哪个号试过。
+		// （只在成功时记录会让"失败了但不知道用的哪个号"变成排障死胡同。）
+		if _, patchErr := s.store.Patch(entry.ID, func(e *store.Entry) { e.Account = account.Name }); patchErr != nil {
+			s.log.Warn("persist account binding failed", "task", entry.ID, "err", patchErr)
+		}
 
-	// 素材必须转存到**站点自己的 CDN**：外链会按 Content-Type 白名单被拒
-	//（实测过一个 .jpg 外链返回非标准 MIME image/jpg，字节其实是 PNG）。
-	params, err := s.rehost(ctx, account, plan.WebParams)
-	if err != nil {
-		release()
-		s.markFailed(entry.ID, err)
+		released := false
+		release := func() {
+			if !released {
+				released = true
+				account.Queue.Release()
+			}
+		}
+
+		// 素材必须转存到**站点自己的 CDN**：外链会按 Content-Type 白名单被拒
+		//（实测过一个 .jpg 外链返回非标准 MIME image/jpg，字节其实是 PNG）。
+		if !rehosted {
+			uploaded, upErr := s.rehost(ctx, account, plan.WebParams)
+			if upErr != nil {
+				release()
+				s.markFailed(entry.ID, upErr)
+				return
+			}
+			params = uploaded
+			rehosted = true
+		}
+
+		taskID, err := account.Client.Create(ctx, params, plan.CaptchaToken)
+		if err != nil {
+			release()
+			s.pool.ReportFailure(account.Name, err)
+
+			// 额度耗尽：该号已被池打上长冷却（2h 起，封顶 UTC 次日 0 点）。
+			// 本次请求换下一个号再试 —— 调用方看不到这个中间态。
+			// 其余错误保持"一次就失败"：宁可少救，不可多扣（超时可能已建任务）。
+			if upstream.IsQuotaExhausted(err) && attempt < maxQuotaSwitches && ctx.Err() == nil {
+				s.recordSubmitFailure(entry, "submit", "web", err.Error())
+				s.log.Warn("quota exhausted, switching account",
+					"task", entry.ID, "account", account.Name, "attempt", attempt+1, "err", err)
+				continue
+			}
+
+			s.markFailed(entry.ID, err)
+			s.recordSubmitFailure(entry, "submit", "web", err.Error())
+			s.log.Warn("submit failed", "task", entry.ID, "account", account.Name, "err", err)
+			return
+		}
+		s.pool.ReportSuccess(account.Name)
+
+		if _, err := s.store.Patch(entry.ID, func(e *store.Entry) {
+			e.TaskID = taskID
+			e.Account = account.Name
+			e.SubmittedAtMs = time.Now().UnixMilli()
+			e.Status = "queued"
+		}); err != nil {
+			s.log.Error("persist upstream task id failed", "task", entry.ID, "err", err)
+		}
+
+		// 槽位由盯梢 goroutine 在**终态**释放 —— 上游的槽位语义就是"跑到出片"。
+		account.Queue.Watch(taskID)
+		s.log.Info("submitted", "task", entry.ID, "upstream_task", taskID, "account", account.Name)
+
+		// 账本：公网 API 跑的单也要进历史（面板只记调试页那些动作，缺了这半边就不叫账本）。
+		s.recordSubmit(entry, plan, "web", taskID, nil)
 		return
 	}
-
-	taskID, err := account.Client.Create(ctx, params, plan.CaptchaToken)
-	if err != nil {
-		release()
-		s.pool.ReportFailure(account.Name, err)
-		s.markFailed(entry.ID, err)
-		s.recordSubmitFailure(entry, "submit", "web", err.Error())
-		s.log.Warn("submit failed", "task", entry.ID, "account", account.Name, "err", err)
-		return
-	}
-	s.pool.ReportSuccess(account.Name)
-
-	if _, err := s.store.Patch(entry.ID, func(e *store.Entry) {
-		e.TaskID = taskID
-		e.Account = account.Name
-		e.SubmittedAtMs = time.Now().UnixMilli()
-		e.Status = "queued"
-	}); err != nil {
-		s.log.Error("persist upstream task id failed", "task", entry.ID, "err", err)
-	}
-
-	// 槽位由盯梢 goroutine 在**终态**释放 —— 上游的槽位语义就是"跑到出片"。
-	account.Queue.Watch(taskID)
-	s.log.Info("submitted", "task", entry.ID, "upstream_task", taskID, "account", account.Name)
-
-	// 账本：公网 API 跑的单也要进历史（面板只记调试页那些动作，缺了这半边就不叫账本）。
-	s.recordSubmit(entry, plan, "web", taskID, nil)
 }
 
 // markFailed 把一条记录转成终态失败，并写下**可区分的**失败事实。
@@ -140,12 +167,18 @@ func (s *Server) markFailed(entryID string, err error) {
 	code := codeSubmitFailed
 	quote := ""
 	hint := ""
+	// 池里没有可用账号（全部冷却/停用）本质也是"限流"：调用方该等，不该改参数。
+	var noAccount *pool.ErrNoAccount
+	if errors.As(err, &noAccount) {
+		code = codeRateLimited
+	}
 	var upErr *apierr.UpstreamError
 	if errors.As(err, &upErr) {
 		if upstream.IsContentRejection(upErr) {
 			code = codeContentFiltered
 			quote = quoteForContentRejection(upErr)
-		} else if upErr.Code == "CAPTCHA_REQUIRED" {
+		} else if upErr.Code == "CAPTCHA_REQUIRED" || upstream.IsQuotaExhausted(upErr) {
+			// 额度耗尽同样是"换个时间/换个号再来"，不是参数错。
 			code = codeRateLimited
 		}
 		// 已脱敏的对外说法：让"轮询到的失败"可操作（等闸门 / 换素材 / 加余额），

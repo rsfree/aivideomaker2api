@@ -165,6 +165,13 @@ func (s *Server) handleGetArk(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	// 限流类失败是**异步**暴露的：POST 早已返回 id，客户端轮询到这里才知道。
+	// 在这里补 Retry-After，告诉它等多久再来 —— 否则它只会反复轮询或改参数重投。
+	if entry.SubmitErrorCode == codeRateLimited {
+		if wait := s.pool.EarliestRecovery(); wait > 0 {
+			w.Header().Set("Retry-After", retryAfterSeconds(wait))
+		}
+	}
 	writeJSON(w, http.StatusOK, translate.ArkTaskView(view))
 }
 
@@ -181,6 +188,11 @@ func (s *Server) handleGetOpenAI(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	if entry.SubmitErrorCode == codeRateLimited {
+		if wait := s.pool.EarliestRecovery(); wait > 0 {
+			w.Header().Set("Retry-After", retryAfterSeconds(wait))
+		}
 	}
 	writeJSON(w, http.StatusOK, openaivideos.TaskView(view, entry.CreatedAtMs/1000))
 }

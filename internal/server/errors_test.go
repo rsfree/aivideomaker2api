@@ -32,3 +32,17 @@ func TestTimeoutMessageNeverInvitesABlindRetry(t *testing.T) {
 		t.Errorf("message leaks the internal procedure name: %q", msg)
 	}
 }
+
+// 上游 401 是**我们的** cookie 失效，不是调用方的 key 错了。
+// 原样透传 401 会让调用方去换 key，而真正要修的是池里的会话（video-adapter §2.5）。
+func TestUpstream401IsAServerFault(t *testing.T) {
+	up := apierr.NewUpstream("ai.minimaxH3", "unauthorized", "UNAUTHORIZED", http.StatusUnauthorized)
+	if got := statusToHTTP(up); got != http.StatusBadGateway {
+		t.Errorf("upstream 401 -> %d, want 502 (server-side credential expiry)", got)
+	}
+	// 而 404 仍然透传：那是"任务不存在"，调用方需要看到真实原因。
+	nf := apierr.NewUpstream("model.getModel", "task not found", "NOT_FOUND", http.StatusNotFound)
+	if got := statusToHTTP(nf); got != http.StatusNotFound {
+		t.Errorf("upstream 404 -> %d, want 404", got)
+	}
+}

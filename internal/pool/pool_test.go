@@ -530,3 +530,61 @@ func TestRemoveAndToggleUseActualSpecPath(t *testing.T) {
 		t.Error("the real credential file (acc1.json) must be deleted, not a guessed prod-1.json")
 	}
 }
+
+// 额度耗尽必须换来"长冷却"，而不是 30 秒后又回去撞同一堵墙。
+func TestQuotaExhaustedGetsLongCooldown(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "acc1")
+
+	quotaErr := errors.New("ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT")
+	p.ReportFailure("acc1", quotaErr)
+
+	acc, ok := p.Account("acc1")
+	if !ok {
+		t.Fatal("account missing")
+	}
+	acc.mu.RLock()
+	until, last, hits := acc.state.CooldownUntil, acc.state.LastError, acc.state.QuotaHits
+	acc.mu.RUnlock()
+
+	if until <= time.Now().Add(time.Hour).UnixMilli() {
+		t.Errorf("cooldown until=%d, want at least 1h ahead", until)
+	}
+	if hits != 1 {
+		t.Errorf("quota_hits = %d, want 1", hits)
+	}
+	if !strings.Contains(last, "额度") {
+		t.Errorf("last_error = %q, should explain quota exhaustion", last)
+	}
+
+	// 再撞一次要延长（翻倍），而不是重置成同一档。
+	before := until
+	p.ReportFailure("acc1", quotaErr)
+	acc.mu.RLock()
+	after := acc.state.CooldownUntil
+	acc.mu.RUnlock()
+	if after <= before {
+		t.Errorf("second hit must extend the cooldown: %d -> %d", before, after)
+	}
+}
+
+// 额度冷却的边界：2h 起步 / 翻倍 / 封顶 UTC 次日零点 / 保底 15 分钟。
+func TestQuotaCooldownBounds(t *testing.T) {
+	day := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	if got := quotaCooldown(1, day).Sub(day); got != 2*time.Hour {
+		t.Errorf("first hit = %v, want 2h", got)
+	}
+	if got := quotaCooldown(3, day).Sub(day); got != 8*time.Hour {
+		t.Errorf("third hit = %v, want 8h", got)
+	}
+	// 20:00 UTC：2h 翻倍到 4h 会越过零点 ⇒ 封顶在次日 0 点。
+	late := time.Date(2026, 11, 19, 20, 0, 0, 0, time.UTC)
+	if got := quotaCooldown(2, late); !got.Equal(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("near midnight = %v, want UTC next midnight", got)
+	}
+	// 23:55 UTC：零点只剩 5 分钟 ⇒ 保底 15 分钟。
+	last := time.Date(2026, 11, 19, 23, 55, 0, 0, time.UTC)
+	if got := quotaCooldown(1, last).Sub(last); got < 15*time.Minute {
+		t.Errorf("floor violated: %v", got)
+	}
+}

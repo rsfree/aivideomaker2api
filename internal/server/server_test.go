@@ -25,6 +25,9 @@ type fakeSite struct {
 	server     *httptest.Server
 	createHits int
 	createFail func(w http.ResponseWriter)
+	// createFailWhen 返回非空消息时，按该账号（cookie）返回 tRPC error ——
+	// 用于验证"某个号额度耗尽、换号重试"这类按账号分叉的行为。
+	createFailWhen func(cookie string) string
 	// gateAfter > 0：前 gateAfter 次闸门探测说"关"，之后说"开"（模拟速率型翻转）。
 	gateAfter int32
 	gateHits  int32
@@ -61,6 +64,14 @@ func newFakeSite(t *testing.T) *fakeSite {
 			fs.createFail(w)
 			return
 		}
+		if fs.createFailWhen != nil {
+			if msg := fs.createFailWhen(r.Header.Get("cookie")); msg != "" {
+				w.Header().Set("content-type", "application/json")
+				_, _ = w.Write([]byte(`[{"error":{"json":{"message":"` + msg +
+					`","data":{"code":"TOO_MANY_REQUESTS","httpStatus":429}}}}]`))
+				return
+			}
+		}
 		writeEnvelope(w, "up-task-1")
 	})
 	mux.HandleFunc("/api/model.getModel", func(w http.ResponseWriter, r *http.Request) {
@@ -84,12 +95,22 @@ type harness struct {
 
 func newHarness(t *testing.T, mutate func(*Config), mediaBase string) *harness {
 	t.Helper()
+	return newHarnessWith(t, mutate, mediaBase,
+		map[string]string{"acc1": "auth_session=test-session"})
+}
+
+// newHarnessWith 允许注入多个账号（文件名决定池的选号顺序，Glob 按字典序）。
+func newHarnessWith(t *testing.T, mutate func(*Config), mediaBase string,
+	accounts map[string]string) *harness {
+	t.Helper()
 	site := newFakeSite(t)
 
 	authDir := t.TempDir()
-	raw := []byte(`{"name":"acc1","cookie":"auth_session=test-session"}`)
-	if err := os.WriteFile(filepath.Join(authDir, "acc1.json"), raw, 0o600); err != nil {
-		t.Fatal(err)
+	for name, cookie := range accounts {
+		raw, _ := json.Marshal(map[string]string{"name": name, "cookie": cookie})
+		if err := os.WriteFile(filepath.Join(authDir, name+".json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p, err := pool.New(pool.Options{
 		AuthDir:        authDir,
@@ -736,5 +757,93 @@ func TestAliasOutsideTheEnumIsUnknown(t *testing.T) {
 	}
 	if h.store.Count("") != 0 {
 		t.Error("an unknown model must not persist a task")
+	}
+}
+
+// 某个号额度耗尽时，本次请求必须换号成功 —— 调用方零感知。
+func TestSubmitSwitchesAccountOnQuotaExhausted(t *testing.T) {
+	// 文件名决定选号顺序（Glob 按字典序）：a-quota 先被选中。
+	h := newHarnessWith(t, nil, "", map[string]string{
+		"a-quota":   "auth_session=quota-dead",
+		"b-healthy": "auth_session=healthy",
+	})
+	h.site.createFailWhen = func(cookie string) string {
+		if strings.Contains(cookie, "quota-dead") {
+			return "ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"
+		}
+		return ""
+	}
+
+	code, out := h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks",
+		`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":5,"resolution":"480p"}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (%v)", code, out)
+	}
+	entry, ok := h.store.Get(fmt.Sprint(out["id"]))
+	if !ok {
+		t.Fatal("task not stored")
+	}
+	if entry.Status != "queued" {
+		t.Errorf("status = %q, want queued (the healthy account took over)", entry.Status)
+	}
+	if entry.Account != "b-healthy" {
+		t.Errorf("account = %q, want b-healthy", entry.Account)
+	}
+	if h.site.createHits != 2 {
+		t.Errorf("create hits = %d, want 2 (quota-dead once, healthy once)", h.site.createHits)
+	}
+
+	// 额度耗尽的号必须被长冷却挡住，否则下一个请求还会先撞它。
+	for _, v := range h.pool.Snapshot() {
+		if v.Name != "a-quota" {
+			continue
+		}
+		if v.CooldownUntilMs <= time.Now().Add(time.Hour).UnixMilli() {
+			t.Errorf("a-quota cooldown until=%d, want at least 1h ahead", v.CooldownUntilMs)
+		}
+	}
+}
+
+// 全池都耗尽时，对外必须是"限流可重试"，而不是含糊的 SubmissionFailed。
+func TestQuotaExhaustedEverywhereSurfacesAsRateLimit(t *testing.T) {
+	h := newHarness(t, nil, "")
+	h.site.createFailWhen = func(string) string { return "ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT" }
+
+	h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks",
+		`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":5,"resolution":"480p"}`, nil)
+
+	entries := h.store.List(10, 0, "")
+	if len(entries) != 1 {
+		t.Fatalf("stored %d tasks, want 1", len(entries))
+	}
+	if entries[0].Status != "failed" {
+		t.Fatalf("status = %q, want failed", entries[0].Status)
+	}
+	if entries[0].SubmitErrorCode != "RateLimitExceeded" {
+		t.Errorf("code = %q, want RateLimitExceeded (retryable, not a parameter error)",
+			entries[0].SubmitErrorCode)
+	}
+}
+
+// 限流失败的响应必须带 Retry-After —— 否则客户端只会在"反复轮询"和"改参数重投"
+// 之间二选一（video-adapter §2.5：429 必须给等待时间）。
+func TestRateLimitedTaskCarriesRetryAfter(t *testing.T) {
+	h := newHarness(t, nil, "")
+	// 让池里真的有一个冷却中的号，EarliestRecovery 才会 > 0。
+	h.pool.ReportFailure("acc1", fmt.Errorf("ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"))
+
+	_ = h.store.Put(&store.Entry{
+		ID: "cgt-rl", Model: "minimaxH3", Status: "failed",
+		SubmitErrorCode: "RateLimitExceeded", CreatedAtMs: time.Now().UnixMilli(),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/v3/contents/generations/tasks/cgt-rl", nil)
+	rec := httptest.NewRecorder()
+	h.server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got == "" {
+		t.Error("a rate-limited task must answer with Retry-After (seconds), got none")
 	}
 }

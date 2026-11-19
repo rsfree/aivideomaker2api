@@ -629,6 +629,35 @@ var parameterLikeMarkers = []string{
 	"too_big", "too_small", "unrecognized_keys",
 }
 
+// quotaExhaustedMarkers 是"账号级免费额度用完"的实测措辞。
+//
+// 与"抖动"的本质区别：它**当天不会自愈**。站点用 429 返回，但冷却 30 秒再试
+// 只会再撞一次（生产实测：同一账号连续白撞 4 次，每次都是一次真实的提交机会）。
+var quotaExhaustedMarkers = []string{
+	"free_daily_limit", // MINIMAX_H3_FREE_DAILY_LIMIT
+	"daily limit",      // 文案变体
+	"quota_exceeded",   // 通用写法
+	"insufficient_quota",
+}
+
+// IsQuotaExhausted 判断失败是"这个账号的免费额度用完了"。
+//
+// 调用方据此做两件事：给该号**长冷却**（不是 30 秒）、并在本次请求内**换号重试**。
+// 这类错误明确没接单（空 taskId / 显式 429），重试零副作用 —— 与超时那种
+// "可能已经建了任务"的情形完全不同。
+func IsQuotaExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	blob := strings.ToLower(err.Error())
+	for _, marker := range quotaExhaustedMarkers {
+		if strings.Contains(blob, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsParameterLike 判断失败是否来自请求体形状（而不是账号状态）。
 func IsParameterLike(err error) bool {
 	if err == nil {

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rsfree/aivideomaker2api/internal/apierr"
 	"github.com/rsfree/aivideomaker2api/internal/pool"
@@ -33,7 +35,12 @@ const (
 //
 // **504 是我们自己产生的**（取参考文件链接或整个转存阶段超过预算）—— 不放进来的话会被
 // 压成 502，调用方就分不清"上游坏了"与"你给的链接太慢/太大"。
-var passThroughStatus = map[int]bool{400: true, 401: true, 403: true, 404: true, 429: true, 504: true}
+//
+// 🔴 **401/403 刻意不在表里**：上游的 401 意味着**我们的**账号 cookie 失效，
+// 原样透传会让调用方以为自己的 Bearer token 有问题 —— 他会去换 key，而真正要修的是
+// 池里的会话。这种错归 502（服务方故障），修法才对得上。
+// （`download` 的 403 是另一回事，已在 statusToHTTP 里单独判成 400。）
+var passThroughStatus = map[int]bool{400: true, 404: true, 429: true, 504: true}
 
 const submissionFailedMessage = "the task could not be submitted to the upstream"
 
@@ -180,6 +187,13 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		s.log.Error("unhandled error", "err", err)
 	}
 
+	// 429 必须带 Retry-After（协议要求，且能挡住"改参数重发"这种坏反应）。
+	if status == http.StatusTooManyRequests {
+		if wait := s.pool.EarliestRecovery(); wait > 0 {
+			w.Header().Set("Retry-After", retryAfterSeconds(wait))
+		}
+	}
+
 	envelope := map[string]any{
 		"error": map[string]any{
 			"code":    code,
@@ -189,6 +203,16 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		},
 	}
 	writeJSON(w, status, envelope)
+}
+
+// retryAfterSeconds 把冷却剩余时间转成 Retry-After 的秒数（至少 1 秒，
+// 避免 `Retry-After: 0` 被客户端理解成"立刻重试"）。
+func retryAfterSeconds(d time.Duration) string {
+	sec := int(d / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	return strconv.Itoa(sec)
 }
 
 // withRequestID 让 message 以 `Request ID: {id}` 结尾 —— **全服务唯一负责这件事的地方**。
