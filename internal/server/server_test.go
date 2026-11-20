@@ -110,7 +110,7 @@ func newHarness(t *testing.T, mutate func(*Config), mediaBase string) *harness {
 
 // newHarnessWith 允许注入多个账号（文件名决定池的选号顺序，Glob 按字典序）。
 func newHarnessWith(t *testing.T, mutate func(*Config), mediaBase string,
-	accounts map[string]string) *harness {
+	accounts map[string]string, passthrough ...bool) *harness {
 	t.Helper()
 	site := newFakeSite(t)
 
@@ -144,9 +144,10 @@ func newHarnessWith(t *testing.T, mutate func(*Config), mediaBase string,
 	}
 	t.Cleanup(func() { st.Close() })
 
-	proxy := media.New(mediaBase, "/v", 5*time.Second)
+	pass := len(passthrough) > 0 && passthrough[0]
+	proxy := media.New(mediaBase, "/v", 5*time.Second, pass)
 	if mediaBase == "" {
-		proxy = media.New("", "/v", 5*time.Second)
+		proxy = media.New("", "/v", 5*time.Second, pass)
 	}
 
 	cfg := Config{
@@ -215,6 +216,47 @@ func TestOpenAIVideosEndToEnd(t *testing.T) {
 	}
 	if entry.Effective["billed"] != false {
 		t.Errorf("billed = %v, want false (this face only runs the free tier)", entry.Effective["billed"])
+	}
+}
+
+// passthrough 模式：对外**直接给上游地址**，但 /v/ 端点仍然保留（历史链接不失效）。
+//
+// 为什么要有这个模式：改写会把每条成片（几百 MB）的下载流量都压到本服务上，
+// 而调用方多数只是把链接转手给终端用户 —— 直连上游更省，也少一个故障点。
+func TestMediaPassthroughReturnsUpstreamURL(t *testing.T) {
+	h := newHarnessWith(t, nil, "https://avm2api.example",
+		map[string]string{"acc1": "auth_session=test-session"}, true)
+
+	body := `{"model":"minimaxH3","content":[{"type":"text","text":"a red balloon"}],` +
+		`"resolution":"480p","duration":5}`
+	code, created := h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks", body, nil)
+	if code != http.StatusOK {
+		t.Fatalf("create status = %d (%v)", code, created)
+	}
+	id := created["id"].(string)
+
+	code, view := h.do(t, http.MethodGet, "/api/v3/contents/generations/tasks/"+id, "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("get status = %d", code)
+	}
+	content, _ := view["content"].(map[string]any)
+	url := fmt.Sprint(content["video_url"])
+	if !strings.Contains(url, "img2video.ai") {
+		t.Errorf("video_url = %q, want the upstream address in passthrough mode", url)
+	}
+	if strings.Contains(url, "/v/") {
+		t.Errorf("video_url = %q, must NOT be rewritten to the local /v/ endpoint", url)
+	}
+
+	entry, ok := h.store.Get(id)
+	if !ok {
+		t.Fatal("entry disappeared")
+	}
+	if entry.VideoURL != url {
+		t.Errorf("persisted video_url = %q, want %q", entry.VideoURL, url)
+	}
+	if !strings.Contains(entry.SourceURL, "img2video.ai") {
+		t.Errorf("source_url = %q, must still hold the upstream address", entry.SourceURL)
 	}
 }
 

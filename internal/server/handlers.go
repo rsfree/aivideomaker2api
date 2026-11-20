@@ -366,7 +366,9 @@ func (s *Server) applyEvidence(view map[string]any, entry *store.Entry) {
 // 把 content.video_url 换成本服务自己的下载地址。这是**恒等**替换 —— 与"有没有搬过"
 // 无关，所以任务状态照实上报 succeeded，不必引入"成功了但拿不到地址"的中间态。
 func (s *Server) applyMediaGate(view map[string]any, entry *store.Entry) {
-	if s.media == nil || !s.media.Enabled() {
+	// Rewrites（不是 Enabled）：passthrough 模式下端点仍然可用（历史 /v/ 链接不失效），
+	// 但新任务对外就给**上游地址** —— 不再由本服务替上游扛几百 MB 的下载带宽。
+	if s.media == nil || !s.media.Rewrites() {
 		return
 	}
 	content := jsonx.Map(view["content"])

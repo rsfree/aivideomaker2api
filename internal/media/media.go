@@ -51,11 +51,17 @@ type Proxy struct {
 	publicBase string
 	path       string
 	client     *http.Client
+	// passthrough 为 true 时**不改写**对外链接：video_url 直接用上游地址。
+	//
+	// 为什么要有这个开关：改写会让我们替上游扛全部下载带宽（成片几百 MB × 每条任务），
+	// 而调用方多数只是把链接转手给终端用户 —— 直连上游更省，也更少一个故障点。
+	// /v/ 端点仍然保留：历史链接不失效，回源能力也还在。
+	passthrough bool
 }
 
 // New 构造出口。readTimeout 是**空闲**超时语义（连接没在动才算卡死），
 // 不用"总超时"——成片可能几百 MB，任何固定总时长都会变成"文件越大越容易失败"。
-func New(publicBase, mediaPath string, readTimeout time.Duration) *Proxy {
+func New(publicBase, mediaPath string, readTimeout time.Duration, passthrough bool) *Proxy {
 	if readTimeout <= 0 {
 		readTimeout = 60 * time.Second
 	}
@@ -72,8 +78,9 @@ func New(publicBase, mediaPath string, readTimeout time.Duration) *Proxy {
 		TLSHandshakeTimeout: 15 * time.Second,
 	}
 	return &Proxy{
-		publicBase: p,
-		path:       prefix,
+		publicBase:  p,
+		path:        prefix,
+		passthrough: passthrough,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   readTimeout,
@@ -87,15 +94,24 @@ func New(publicBase, mediaPath string, readTimeout time.Duration) *Proxy {
 	}
 }
 
-// Enabled 表示出口已配置（= 对外给的是本服务地址）。
+// Enabled 表示出口端点已配置（/v/ 可用）。
 func (p *Proxy) Enabled() bool { return p != nil && p.publicBase != "" }
+
+// Rewrites 表示**对外链接是否改写成 /v/**。
+//
+// Enabled 与 Rewrites 是两件事：passthrough 模式下端点仍然可用（历史链接、回源），
+// 只是新任务的 video_url 直接给上游地址。
+func (p *Proxy) Rewrites() bool { return p.Enabled() && !p.passthrough }
 
 // Path 是下载端点前缀。
 func (p *Proxy) Path() string { return p.path }
 
 // Describe 是 /healthz 用的形态描述（不含任何凭据）。
 func (p *Proxy) Describe() map[string]any {
-	return map[string]any{"enabled": p.Enabled(), "public_base": p.publicBase, "path": p.path}
+	return map[string]any{
+		"enabled": p.Enabled(), "rewrites": p.Rewrites(),
+		"public_base": p.publicBase, "path": p.path,
+	}
 }
 
 // DownloadURL 给出对外地址：`{public_base}{path}/{id}{ext}`。

@@ -125,7 +125,7 @@ func main() {
 	p.StartBackground()
 
 	// ---- 成片出口 ----
-	proxy := media.New(cfg.PublicBase, cfg.MediaPath, cfg.Upstream.MediaReadTimeout.Get())
+	proxy := media.New(cfg.PublicBase, cfg.MediaPath, cfg.Upstream.MediaReadTimeout.Get(), cfg.MediaPassthrough)
 
 	// 面板只读展示官方通路（不把 key 传进去，只传"能不能读"和读取函数）。
 	var officialAccount func(context.Context) (map[string]any, error)

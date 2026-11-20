@@ -74,6 +74,11 @@ type Config struct {
 	// 留空 = 成片出口关闭，行为与从前逐字节一致（原样透传上游链接）。
 	PublicBase string `json:"public_base"`
 	MediaPath  string `json:"media_path"`
+	// MediaPassthrough 为 true 时，对外 video_url **直接给上游地址**，不改写成本服务的 /v/。
+	//
+	// 与"关掉出口"不同：/v/ 端点仍然可用（历史链接不失效、回源能力还在），
+	// 只是新任务不再让本服务替上游扛下载带宽。
+	MediaPassthrough bool `json:"media_passthrough"`
 
 	AuthDir   string `json:"auth_dir"`
 	StateFile string `json:"state_file"`
@@ -247,6 +252,7 @@ func applyEnv(cfg *Config) {
 	setStr(&cfg.APIKey, "AVM2_API_KEY")
 	setStr(&cfg.BaseURL, "AVM2_BASE_URL")
 	setStr(&cfg.PublicBase, "AVM2_PUBLIC_BASE")
+	setBool(&cfg.MediaPassthrough, "AVM2_MEDIA_PASSTHROUGH")
 	setStr(&cfg.AuthDir, "AVM2_AUTH_DIR")
 	setStr(&cfg.StateFile, "AVM2_STATE_FILE")
 	setStr(&cfg.TaskStore.Path, "AVM2_TASK_STORE")
@@ -270,6 +276,20 @@ func setStr(dst *string, env string) {
 	if raw, ok := os.LookupEnv(env); ok && strings.TrimSpace(raw) != "" {
 		*dst = strings.TrimSpace(raw)
 	}
+}
+
+// setBool 用环境变量覆盖布尔项。语义与 setStr 一致：**空值不算设置**，
+// 这样"没配这个变量"和"配了空"得到同一个结果（沿用配置文件/默认值）。
+func setBool(dst *bool, env string) {
+	raw, ok := os.LookupEnv(env)
+	if !ok {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	*dst = !(raw == "0" || strings.EqualFold(raw, "false") || strings.EqualFold(raw, "no"))
 }
 
 // Validate 把配置错误挡在起服务之前，而不是等第一个请求打进来。

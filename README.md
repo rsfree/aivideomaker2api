@@ -433,6 +433,9 @@ POST ──► 选号（优先空闲槽 → 负载率低 → 余额多）──�
   换一个 `visitorId` 再试（最多 2 次）—— 号是稀缺的、标识是廉价的；
   仍然耗尽才按"长冷却 2h 起步、封顶 UTC 次日 0 点"处理并换号（最多 3 次）。
   全池都耗尽时对外报 `RateLimitExceeded`（可重试），不是 `SubmissionFailed`。
+- **成片链接两种形态**：默认改写成本服务 `/v/…mp4`（隐藏上游域名、可加鉴权）；
+  设 `media_passthrough: true`（或 `AVM2_MEDIA_PASSTHROUGH=1`）后**直接返回上游地址**，
+  不再替上游扛下载带宽 —— 此时 `/v/` 端点仍然保留，历史链接不会失效。
 - **重启后自动补账**：进程启动时对一遍 `store` 里的非终态记录（`ResumeInflight`），
   之后每 60s 再扫一次（`StartInflightReaper`）。终态写回原本**只在 `GET /tasks/{id}` 时**
   发生，所以"部署重启 + 调用方不轮询"会让记录永远停在 `queued` ——
