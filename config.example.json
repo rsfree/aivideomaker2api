@@ -22,14 +22,14 @@
     "write_timeout": "0s"
   },
   "submit": {
-    "_comment": "受理/推进分离：POST 毫秒级返回 id，转存/等槽位/create 在后台做。lease 是「判定推进 goroutine 已死」的时限。retries/retry_backoff 是 upstream 客户端内部的重试。transport_retries = 连接层失败（拒绝连接/DNS/握手）的换号重试，请求确实没送达，安全；timeout_retries = 读超时重试，**默认 0**：上游可能已建任务，重试会造出第二条（免费档吃额度、付费档重复扣费）；runtime_retries = 任务在上游运行期失败（只回 status=failed 不给原因）后的自动重提次数，默认 1 次 + runtime_backoff 退避。inline 只给测试用，生产误开等于关掉「受理即返」。",
+    "_comment": "受理/推进分离：POST 毫秒级返回 id，转存/等槽位/create 在后台做。lease 是「判定推进 goroutine 已死」的时限。retries/retry_backoff 是 upstream 客户端内部的重试。transport_retries = 连接层失败（拒绝连接/DNS/握手）的换号重试，请求确实没送达，安全；timeout_retries = 读超时重试，默认 2：上游可能已建任务，重试可能造出第二条（免费档吃额度、付费档重复扣费），设 0 关闭；runtime_retries = 任务在上游运行期失败（只回 status=failed 不给原因）后的自动重提次数，默认 1 次 + runtime_backoff 退避。inline 只给测试用，生产误开等于关掉「受理即返」。",
     "workers": 32,
     "lease": "1200s",
     "retries": 2,
     "retry_backoff": "3s",
     "inline": false,
     "transport_retries": 1,
-    "timeout_retries": 0,
+    "timeout_retries": 2,
     "runtime_retries": 1,
     "runtime_backoff": "10s"
   },

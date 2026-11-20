@@ -25,7 +25,7 @@
 | `CAPTCHA_REQUIRED` / 429 | ✅ 换 token | 上游根本没到建任务那一步 |
 | 空 taskId（站点静默拒） | ✅ | 站点自己说"不收" |
 | 连接类错误（拒绝连接 / DNS / 握手） | ✅ 退避 + 换号（`submit.transport_retries`，默认 1） | 请求一个字节都没发出去 |
-| `ReadTimeout` / `WriteTimeout` | ⛔ **默认不重试** | 请求可能已被接收 ⇒ 重发＝重复建任务。要开得显式设 `submit.timeout_retries`，并接受"可能多一条上游任务" |
+| `ReadTimeout` / `WriteTimeout` | ✅ 退避 + 换号，默认 **2** 次（`submit.timeout_retries`） | 请求可能已被接收 ⇒ 重发**可能**多建一条任务。站点无幂等键，这是显式接受的代价；设 0 可关回"一次就终态" |
 | 内容审核 | ⛔ | 重发还是拒 |
 | 参数类 / 其他 4xx-5xx | ⛔ | 不是抖动 |
 | 任务在上游**运行期**失败（`status=failed`） | ✅ 退避 10s + 换号重提 **1 次**（`submit.runtime_retries`） | 上游接了单但没跑成；这是**新任务**，原任务照跑照扣（免费档不扣钱） |

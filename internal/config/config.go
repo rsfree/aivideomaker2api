@@ -122,10 +122,11 @@ type SubmitConfig struct {
 	TransportRetries int `json:"transport_retries"`
 	// TimeoutRetries 是"请求已发出但没等到响应"（ReadTimeout）的换号重试次数。
 	//
-	// 🔴 默认 **0（关闭）**：上游很可能已经建了任务，重试会造出第二条。
-	// 免费档不花钱，但要吃一次额度 + 一次闸门计数；付费档就是实打实的重复扣费。
+	// 🔴 默认 **2**（2026-11-21 按运营口径调整）：上游很可能已经建了任务，重试会造出
+	// 第二条 —— 免费档不花钱，但要吃额度 + 闸门计数；付费档就是实打实的重复扣费。
 	// 站点没有任何幂等键可供去重（`model.listModel` 只返回已成功的记录，查不到在途），
-	// 所以这个开关是**风险自担**的。
+	// 这是**显式接受**的代价：换来"一次抖动不再变成调用方的永久失败"。
+	// 要关掉就设 0 —— 那时读超时会直接终态失败。
 	TimeoutRetries int `json:"timeout_retries"`
 	// RuntimeRetries 是任务在**上游运行期**失败（上游接了单、跑完回 failed）后的自动重提次数。
 	//
@@ -214,8 +215,8 @@ func Default() Config {
 			Workers: 32, Lease: Duration(1200 * time.Second), Retries: 2, RetryBackoff: Duration(3 * time.Second),
 			// 连接层失败（拒绝连接/DNS/握手）可以放心重试：请求确实没送达。
 			TransportRetries: 1,
-			// 读超时**默认不重试**：上游可能已建任务，重试会造出第二条（详见字段注释）。
-			TimeoutRetries: 0,
+			// 读超时重试 2 次：上游可能已建任务，重试会造出第二条（详见字段注释）。
+			TimeoutRetries: 2,
 			// 运行期失败重提 1 次 + 10s 退避。
 			RuntimeRetries: 1,
 			RuntimeBackoff: Duration(10 * time.Second),
