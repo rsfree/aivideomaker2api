@@ -532,6 +532,50 @@ func TestRemoveAndToggleUseActualSpecPath(t *testing.T) {
 }
 
 // 额度耗尽必须换来"长冷却"，而不是 30 秒后又回去撞同一堵墙。
+// 轮换设备标识必须**落盘**，否则重启后又回到共享默认值，整池额度再次合并。
+func TestRotateVisitorIDPersistsToSpecFile(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "acc1")
+	defer p.Close()
+
+	id, err := p.RotateVisitorID("acc1")
+	if err != nil {
+		t.Fatalf("RotateVisitorID: %v", err)
+	}
+	if len(id) != 32 {
+		t.Errorf("visitor id = %q (len %d), want 32 hex chars", id, len(id))
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "acc1.json"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		t.Fatalf("spec is not JSON: %v", err)
+	}
+	if spec["visitor_id"] != id {
+		t.Errorf("spec visitor_id = %v, want %q", spec["visitor_id"], id)
+	}
+	// 其它字段不能被抹掉：这是"读改写整份文件"的回归点。
+	if spec["cookie"] != "auth_session=test-session-acc1" {
+		t.Errorf("cookie was clobbered: %v", spec["cookie"])
+	}
+
+	// 轮换后该号必须立刻可复用（新标识 = 新额度），不能被旧的 2h 冷却按住。
+	for _, v := range p.Snapshot() {
+		if v.Name != "acc1" {
+			continue
+		}
+		if v.CooldownUntilMs > time.Now().Add(time.Minute).UnixMilli() {
+			t.Errorf("cooldown=%d, want cleared after rotation", v.CooldownUntilMs)
+		}
+		if v.VisitorID != id {
+			t.Errorf("snapshot visitor_id = %q, want %q", v.VisitorID, id)
+		}
+	}
+}
+
 func TestQuotaExhaustedGetsLongCooldown(t *testing.T) {
 	dir := t.TempDir()
 	p := newTestPool(t, dir, "acc1")

@@ -126,6 +126,15 @@ function accountRow(acc, todayByAccount) {
       el('div', { class: 'mono', text: acc.name }),
       acc.note ? el('div', { class: 'muted', text: acc.note }) : null,
       el('div', { class: 'muted mono', text: acc.cookie_masked || '' }),
+      // 设备标识是**额度的计量单位**（不是凭据）：显式展示，才能解释"为什么两个号同套餐、
+      // 一个能跑一个 429"。只给前 8 位，完整值挂在 title 上。
+      acc.visitor_id
+        ? el('div', {
+            class: 'muted mono',
+            text: '设备 ' + String(acc.visitor_id).slice(0, 8) + '…',
+            title: String(acc.visitor_id),
+          })
+        : null,
     ]),
     el('td', { dataset: { label: '状态' } }, [
       enabledBadge,

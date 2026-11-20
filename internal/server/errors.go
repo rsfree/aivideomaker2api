@@ -142,6 +142,10 @@ func clientMessage(err *apierr.UpstreamError) string {
 		why = "the upstream did not respond in time: it may or may not have created the task " +
 			"(a task created this way is not tracked here and may still be billed). Check the " +
 			"upstream task list before resubmitting — a blind retry can create and charge a second task"
+	case upstream.IsQueueFull(err):
+		// 并发槽位满：池里每个号都已经在跑满 4 条。调用方该等，不该改参数。
+		why = "every pooled account already has all of its concurrent slots running; " +
+			"no task was created, so waiting and retrying later is safe"
 	case err.HTTPStatus == http.StatusTooManyRequests:
 		why = "the upstream rate-limited this request"
 	case err.Transport != "":

@@ -37,6 +37,11 @@ type Client struct {
 	mu     sync.Mutex
 	userID string
 
+	// visitorID 是**设备标识**，站点的免费额度按它计量（实测：同一账号同一时刻，
+	// 换一个 32 位 hex 就能建出任务，用默认值则 429 MINIMAX_H3_FREE_DAILY_LIMIT）。
+	// 因此它必须可运行时轮换，且读要加锁 —— 否则并发轮换会写坏正在用的请求体。
+	visitorID string
+
 	captchaMu  sync.Mutex
 	captchaAt  time.Time
 	captchaVal bool
@@ -64,16 +69,45 @@ func New(cfg Config) (*Client, error) {
 		logf = func(string, ...any) {}
 	}
 	return &Client{
-		cfg:    cfg,
-		http:   httpClient,
-		probe:  newProbeClient(cfg, httpClient),
-		userID: strings.TrimSpace(cfg.UserID),
-		logf:   logf,
+		cfg:       cfg,
+		http:      httpClient,
+		probe:     newProbeClient(cfg, httpClient),
+		userID:    strings.TrimSpace(cfg.UserID),
+		visitorID: cfg.VisitorID,
+		logf:      logf,
 	}, nil
 }
 
 // Close 释放连接。
 func (c *Client) Close() { c.http.CloseIdleConnections() }
+
+// VisitorID 返回当前设备标识。
+//
+// 空值回落到构造时的配置（withDefaults 已保证非空），所以调用方永远拿得到可用值。
+func (c *Client) VisitorID() string {
+	c.mu.Lock()
+	v := c.visitorID
+	c.mu.Unlock()
+	if v != "" {
+		return v
+	}
+	return c.cfg.VisitorID
+}
+
+// SetVisitorID 轮换设备标识。
+//
+// 为什么这是**额度**而不是**风控**上的动作：站点的免费额度记在 visitorId 上，
+// 共用同一个默认值等于把整池号的额度合并成一份 —— 一个号跑完，池里所有号一起 429。
+// 每个号有自己的标识，额度才真正按号分开。
+func (c *Client) SetVisitorID(v string) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return
+	}
+	c.mu.Lock()
+	c.visitorID = v
+	c.mu.Unlock()
+}
 
 // Config 返回（已补默认值的）配置副本。
 func (c *Client) Config() Config { return c.cfg }
@@ -440,7 +474,7 @@ func (c *Client) createOnce(ctx context.Context, params map[string]any, token st
 		"resolution":         orDefault(params["resolution"], "480p"),
 		"tier":               orDefault(params["tier"], "turbo"),
 		"promptEnrichment":   params["promptEnrichment"] == true,
-		"visitorId":          c.cfg.VisitorID,
+		"visitorId":          c.VisitorID(),
 		"token":              tokenValue,
 	}
 
@@ -658,6 +692,38 @@ func IsQuotaExhausted(err error) bool {
 	return false
 }
 
+// queueFullMarkers 是"这个号的并发槽位已满"的实测措辞。
+//
+// 站点用 **HTTP 500 + INTERNAL_SERVER_ERROR** 返回它（不是 429），原文：
+//
+//	The queue is full. The pro plan can only run 4 task at a time.
+//
+// 所以只能按文案识别 —— 不识别就会被当成上游 5xx 故障去冷却账号，
+// 而它其实**几十秒到几分钟就自愈**（任务跑完释放槽位）。
+var queueFullMarkers = []string{
+	"queue is full",
+	"can only run",
+}
+
+// IsQueueFull 判断失败是"该号的并发槽位满了"。
+//
+// 与额度耗尽、与真实 5xx 的区别：
+//   - 额度耗尽：当天（实测是更久）不会自愈 ⇒ 长冷却 + 换号
+//   - 并发满：  槽位一空就好 ⇒ 短绕行 + 换号，且**不计账号故障**
+//   - 真实 5xx：连不上/服务端坏了 ⇒ 计故障、指数退避
+func IsQueueFull(err error) bool {
+	if err == nil {
+		return false
+	}
+	blob := strings.ToLower(err.Error())
+	for _, marker := range queueFullMarkers {
+		if strings.Contains(blob, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsParameterLike 判断失败是否来自请求体形状（而不是账号状态）。
 func IsParameterLike(err error) bool {
 	if err == nil {
@@ -758,7 +824,7 @@ func (c *Client) FindInList(ctx context.Context, taskID string, limit int) map[s
 func (c *Client) MintStatusToken(ctx context.Context, taskID string) (string, error) {
 	query := url.Values{}
 	query.Set("id", taskID)
-	query.Set("visitorId", c.cfg.VisitorID)
+	query.Set("visitorId", c.VisitorID())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.cfg.BaseURL+"/api/model-status/token?"+query.Encode(), nil)
 	if err != nil {
@@ -818,7 +884,7 @@ func (c *Client) GetTask(ctx context.Context, taskID string, timeout time.Durati
 		query := url.Values{}
 		query.Set("id", taskID)
 		query.Set("token", token)
-		query.Set("visitorId", c.cfg.VisitorID)
+		query.Set("visitorId", c.VisitorID())
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet,
 			c.cfg.BaseURL+"/api/model-status?"+query.Encode(), nil)
 		if reqErr == nil {

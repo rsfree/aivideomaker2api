@@ -67,6 +67,15 @@ func newFakeSite(t *testing.T) *fakeSite {
 		if fs.createFailWhen != nil {
 			if msg := fs.createFailWhen(r.Header.Get("cookie")); msg != "" {
 				w.Header().Set("content-type", "application/json")
+				// `500:` 前缀 = 复现站点的**真实**形态：并发满返回 500 + INTERNAL_SERVER_ERROR，
+				// 不是 429。两种形态在识别逻辑里必须分开处理，测试桩也要能分开造。
+				if strings.HasPrefix(msg, "500:") {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`[{"error":{"json":{"message":"` +
+						strings.TrimPrefix(msg, "500:") +
+						`","data":{"code":"INTERNAL_SERVER_ERROR","httpStatus":500}}}}]`))
+					return
+				}
 				_, _ = w.Write([]byte(`[{"error":{"json":{"message":"` + msg +
 					`","data":{"code":"TOO_MANY_REQUESTS","httpStatus":429}}}}]`))
 				return
@@ -789,8 +798,21 @@ func TestSubmitSwitchesAccountOnQuotaExhausted(t *testing.T) {
 	if entry.Account != "b-healthy" {
 		t.Errorf("account = %q, want b-healthy", entry.Account)
 	}
-	if h.site.createHits != 2 {
-		t.Errorf("create hits = %d, want 2 (quota-dead once, healthy once)", h.site.createHits)
+	// 额度耗尽的新语义：**先给这个号换设备标识**（站点把免费额度记在 visitorId 上），
+	// 最多轮换 2 次，仍耗尽才换号。所以 a-quota 被打 3 次、b-healthy 1 次。
+	if h.site.createHits != 4 {
+		t.Errorf("create hits = %d, want 4 (quota-dead 1 + 2 visitor rotations, healthy once)", h.site.createHits)
+	}
+
+	// 轮换必须是**真的换了**：轮换后仍报同一个标识就说明额度池没被换开。
+	rotated := ""
+	for _, v := range h.pool.Snapshot() {
+		if v.Name == "a-quota" {
+			rotated = v.VisitorID
+		}
+	}
+	if rotated == "" || rotated == "f29ee26edcb4e8b96ee17e277a384f6f" {
+		t.Errorf("a-quota visitor_id = %q, want a freshly rotated 32-hex id", rotated)
 	}
 
 	// 额度耗尽的号必须被长冷却挡住，否则下一个请求还会先撞它。
@@ -800,6 +822,48 @@ func TestSubmitSwitchesAccountOnQuotaExhausted(t *testing.T) {
 		}
 		if v.CooldownUntilMs <= time.Now().Add(time.Hour).UnixMilli() {
 			t.Errorf("a-quota cooldown until=%d, want at least 1h ahead", v.CooldownUntilMs)
+		}
+	}
+}
+
+// 并发槽位满（上游 500 + "The queue is full"）必须换号，且**不能**把号打成故障冷却。
+//
+// 这是与额度耗尽的关键区分：额度耗尽要长冷却（当天不再试），并发满只要几十秒绕行
+// （任务跑完槽位就空）。混在一起会让一个健康的忙号被冷藏两小时。
+func TestQueueFullSwitchesAccountWithoutLongCooldown(t *testing.T) {
+	h := newHarnessWith(t, nil, "", map[string]string{
+		"a-busy":    "auth_session=busy",
+		"b-healthy": "auth_session=healthy",
+	})
+	h.site.createFailWhen = func(cookie string) string {
+		if strings.Contains(cookie, "busy") {
+			return "500:The queue is full. The pro plan can only run 4 task at a time."
+		}
+		return ""
+	}
+
+	code, out := h.do(t, http.MethodPost, "/api/v3/contents/generations/tasks",
+		`{"model":"minimaxH3","content":[{"type":"text","text":"x"}],"duration":5,"resolution":"480p"}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (%v)", code, out)
+	}
+	entry, ok := h.store.Get(fmt.Sprint(out["id"]))
+	if !ok {
+		t.Fatal("task not stored")
+	}
+	if entry.Account != "b-healthy" {
+		t.Errorf("account = %q, want b-healthy (a busy account must be skipped, not retried)", entry.Account)
+	}
+	for _, v := range h.pool.Snapshot() {
+		if v.Name != "a-busy" {
+			continue
+		}
+		if v.CooldownUntilMs > time.Now().Add(2*time.Minute).UnixMilli() {
+			t.Errorf("a-busy cooldown=%d, want a short bypass (<=2min), not a long failure cooldown",
+				v.CooldownUntilMs)
+		}
+		if v.FailCount != 0 {
+			t.Errorf("a-busy fail_count = %d, want 0 (a busy account is not a broken account)", v.FailCount)
 		}
 	}
 }

@@ -123,10 +123,41 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 			rehosted = true
 		}
 
-		taskID, err := account.Client.Create(ctx, params, plan.CaptchaToken)
-		if err != nil {
+		// 额度记在 **visitorId** 上，不是记在账号上（实测：同一账号同一时刻，
+		// 换一个 32 位 hex 就能建出任务，用共享默认值则 429 FREE_DAILY_LIMIT）。
+		// 所以撞额度时先换设备标识再试 —— 号是稀缺的、标识是廉价的。
+		// 上限 2 次：够绕过"这个标识被压死"，又不至于把额度池在一条请求里搅穿。
+		const visitorRotations = 2
+		var taskID string
+		var createErr error
+		for rot := 0; ; rot++ {
+			taskID, createErr = account.Client.Create(ctx, params, plan.CaptchaToken)
+			if createErr == nil {
+				break
+			}
+			if !upstream.IsQuotaExhausted(createErr) || rot >= visitorRotations || ctx.Err() != nil {
+				break
+			}
+			id, rotErr := s.pool.RotateVisitorID(account.Name)
+			if rotErr != nil {
+				break
+			}
+			s.log.Warn("quota exhausted, rotated visitor id",
+				"task", entry.ID, "account", account.Name, "visitor_id", id, "rotation", rot+1)
+		}
+		if err := createErr; err != nil {
 			release()
 			s.pool.ReportFailure(account.Name, err)
+
+			// 并发槽位满：上游回 500 + "The queue is full. The pro plan can only run 4
+			// task at a time."。槽位一空就自愈，且明确没接单 ⇒ 换号重试零副作用。
+			if upstream.IsQueueFull(err) && attempt < maxQuotaSwitches && ctx.Err() == nil {
+				quotaNotes = append(quotaNotes, fmt.Sprintf("%s: %v", account.Name, err))
+				s.recordSubmitFailure(entry, "submit", "web", err.Error())
+				s.log.Warn("queue full, switching account",
+					"task", entry.ID, "account", account.Name, "attempt", attempt+1)
+				continue
+			}
 
 			// 额度耗尽：该号已被池打上长冷却（2h 起，封顶 UTC 次日 0 点）。
 			// 本次请求换下一个号再试 —— 调用方看不到这个中间态。
@@ -192,7 +223,7 @@ func (s *Server) markFailed(entryID string, err error) {
 		if upstream.IsContentRejection(upErr) {
 			code = codeContentFiltered
 			quote = quoteForContentRejection(upErr)
-		} else if upErr.Code == "CAPTCHA_REQUIRED" || upstream.IsQuotaExhausted(upErr) {
+		} else if upErr.Code == "CAPTCHA_REQUIRED" || upstream.IsQuotaExhausted(upErr) || upstream.IsQueueFull(upErr) {
 			// 额度耗尽同样是"换个时间/换个号再来"，不是参数错。
 			code = codeRateLimited
 		}

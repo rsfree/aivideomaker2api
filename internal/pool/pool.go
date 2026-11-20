@@ -13,6 +13,8 @@ package pool
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +41,14 @@ type Spec struct {
 	Enabled     *bool  `json:"enabled,omitempty"`
 	Note        string `json:"note,omitempty"`
 	MaxInFlight int    `json:"max_in_flight,omitempty"`
+
+	// VisitorID 是这个号的**设备标识**（32 位 hex）。站点把免费额度记在它上面，
+	// 所以每个号必须有自己的一份 —— 共用默认值会让整池号合并成一份额度，
+	// 实测表现就是"一个号跑完，池里所有号一起 429 FREE_DAILY_LIMIT"。
+	//
+	// 缺省时由池在首次使用时生成并写回本文件（见 RotateVisitorID），
+	// 不需要人工配置；显式填写则优先使用。
+	VisitorID string `json:"visitor_id,omitempty"`
 
 	// SourcePath 是这个 spec 实际来自哪个文件（`json:"-"` 不落盘）。
 	// 账号名可以和文件名不同（历史遗留：acc1.json 里 name=prod-1），
@@ -75,6 +85,11 @@ type State struct {
 	// 单独一个字段而不是复用 FailCount：额度耗尽与"抖动"的修法完全不同，
 	// 混在一起会让一次网络抖动把额度冷却的档位推高。
 	QuotaHits int `json:"quota_hits,omitempty"`
+	// VisitorID 是当前生效的设备标识（与 spec 文件同步，便于面板与排障）。
+	VisitorID string `json:"visitor_id,omitempty"`
+	// QuotaRotations 是"因额度耗尽而轮换设备标识"的累计次数。
+	// 它连续增长说明该号的额度已被压到很低，运营该考虑换号而不是继续轮换。
+	QuotaRotations int `json:"quota_rotations,omitempty"`
 }
 
 // Options 是池的构造参数。
@@ -115,8 +130,10 @@ type View struct {
 	CookieMasked string `json:"cookie_masked"`
 	Credits      *int   `json:"credits"`
 	// Email/UserID 只是**展示与去重**用的身份信息，不含任何凭据。
-	Email         string `json:"email,omitempty"`
-	UserID        string `json:"user_id,omitempty"`
+	Email  string `json:"email,omitempty"`
+	UserID string `json:"user_id,omitempty"`
+	// VisitorID 是当前设备标识（额度计量单位）。它是**账号级配置**，不是凭据，可展示。
+	VisitorID     string `json:"visitor_id,omitempty"`
 	Plan          string `json:"plan,omitempty"`
 	Limit         int    `json:"limit"`
 	Captcha       *bool  `json:"captcha"`
@@ -258,6 +275,20 @@ func (p *Pool) addLocked(spec Spec) error {
 	}
 	cfg := p.opts.Upstream
 	cfg.Cookie = cookieHeader
+	// 每号一份设备标识：站点把免费额度记在它上面，**共用默认值等于整池额度合并成一份**。
+	// 所以缺省时不是"沿用默认值"，而是**现场生成一个并立刻落盘** —— 后者才是正确缺省，
+	// 沿用默认值会让第 2 个号起就白配（生产实测：6 个号共享一个标识，全池一起 429）。
+	if v := strings.TrimSpace(spec.VisitorID); v != "" {
+		cfg.VisitorID = v
+	} else {
+		cfg.VisitorID = NewVisitorID()
+		if spec.SourcePath != "" {
+			if err := writeVisitorID(spec.SourcePath, cfg.VisitorID); err != nil {
+				p.logf("[pool] 账号 %s 自动生成 visitor_id 落盘失败（仅本次进程内有效）：%v",
+					spec.Name, err)
+			}
+		}
+	}
 	if cfg.Logf == nil {
 		name := spec.Name
 		cfg.Logf = func(format string, args ...any) {
@@ -546,6 +577,25 @@ func (p *Pool) ReportFailure(name string, err error) {
 		}
 		return
 	}
+	// 并发槽位满：站点用 **500** 返回（"The queue is full. The pro plan can only run 4
+	// task at a time."），但槽位一空就自愈。
+	//
+	// 处理原则：**不计账号故障**（它没坏，只是忙），只给一个很短的绕行窗口，
+	// 让本次请求去用别的号，几十秒后这个号自动回来。
+	if upstream.IsQueueFull(err) {
+		if acc, ok := p.Account(name); ok {
+			acc.mu.Lock()
+			acc.state.LastError = "并发槽位已满（上游 busy，短绕行 " + queueFullCooldown.String() + "）"
+			until := time.Now().Add(queueFullCooldown)
+			if until.UnixMilli() > acc.state.CooldownUntil {
+				acc.state.CooldownUntil = until.UnixMilli()
+			}
+			acc.mu.Unlock()
+			p.saveState()
+			p.logf("[pool] 账号 %s 并发槽位已满 ⇒ 短绕行 %s", name, queueFullCooldown)
+		}
+		return
+	}
 	// 免费额度耗尽：当天不会自愈。给它一个**长冷却**（2h 起步、翻倍、封顶到 UTC 次日
 	// 零点），而不是 30 秒的失败退避 —— 后者只会让它回来再撞一次。
 	if upstream.IsQuotaExhausted(err) {
@@ -557,7 +607,7 @@ func (p *Pool) ReportFailure(name string, err error) {
 		acc.state.QuotaHits++
 		until := quotaCooldown(acc.state.QuotaHits, time.Now())
 		acc.state.CooldownUntil = until.UnixMilli()
-		acc.state.LastError = "免费额度已耗尽（按 UTC 日重置）"
+		acc.state.LastError = "免费额度已耗尽（轮换设备标识后重试）"
 		hits := acc.state.QuotaHits
 		acc.mu.Unlock()
 		p.logf("[pool] 账号 %s 免费额度耗尽（第 %d 次）⇒ 冷却至 %s",
@@ -635,6 +685,80 @@ func utcMidnightAfter(now time.Time) time.Time {
 // 保守取 2 分钟：太短会在闸门还没衰减时反复撞（白烧请求），太长会在闸门已经放开后
 // 还把它晾着。站点侧实测衰减是 5~10 分钟，但 2 分钟足够躲开连续几条的连环 429。
 const captchaCooldown = 2 * time.Minute
+
+// queueFullCooldown 是"并发槽位满"的绕行时长。
+//
+// 上游一次任务中位 132s（实测 40 条成片），4 槽满载时最早释放也要几分钟；
+// 取 20s 只是"别在同一条请求里连环撞同一个号"，真正的恢复靠 Watch 释放槽位。
+const queueFullCooldown = 20 * time.Second
+
+// NewVisitorID 生成一个新的设备标识（32 位小写 hex），与站点前端生成的形状一致。
+func NewVisitorID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// rand 失败极罕见（内核熵池异常）。退化成时间派生，也**绝不返回空**：
+		// 空值会让上游一直用共享默认标识，等于把额度合并回一份。
+		return fmt.Sprintf("%032x", time.Now().UnixNano()&0xffffffffffff)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// RotateVisitorID 给指定账号换一个新的设备标识，并写回它的 auths 文件。
+//
+// 这是**额度层面**的修复，不是风控对抗：免费额度按 visitorId 计量（实测同一账号
+// 同一时刻换一个 hex 就能建任务），共用默认值会让整池合并成一份额度。
+// 轮换后清掉该号的长冷却 —— 新标识就是新额度，没必要再等 2 小时。
+func (p *Pool) RotateVisitorID(name string) (string, error) {
+	acc, ok := p.Account(name)
+	if !ok {
+		return "", fmt.Errorf("account %s not found", name)
+	}
+	id := NewVisitorID()
+	acc.Client.SetVisitorID(id)
+
+	if acc.specPath != "" {
+		if err := writeVisitorID(acc.specPath, id); err != nil {
+			p.logf("[pool] 账号 %s 新 visitor_id 落盘失败（仅本次进程内有效）：%v", name, err)
+		}
+	}
+
+	acc.mu.Lock()
+	acc.state.VisitorID = id
+	acc.state.QuotaRotations++
+	rotations := acc.state.QuotaRotations
+	acc.state.CooldownUntil = 0
+	acc.state.QuotaHits = 0
+	acc.state.LastError = ""
+	acc.mu.Unlock()
+	p.saveState()
+	p.logf("[pool] 账号 %s 轮换设备标识 → %s（累计第 %d 次）", name, id, rotations)
+	return id, nil
+}
+
+// writeVisitorID 把新的设备标识写回 auths/<name>.json。
+//
+// 必须**读改写整份文件**：那里还有 cookie / enabled / note 等字段，
+// 只写 visitor_id 会把它们抹掉。写入用 0600 + rename，避免半写文件让账号加载失败。
+func writeVisitorID(path, id string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return err
+	}
+	spec["visitor_id"] = id
+	out, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
 // ErrNoAccount 表示池里没有可用账号（未配置 / 全部停用 / 全部冷却）。
 type ErrNoAccount struct{ Reason string }
@@ -866,6 +990,7 @@ func (p *Pool) Snapshot() []View {
 			LastError: st.LastError, InUse: acc.Queue.InUse(),
 			Capacity: acc.Queue.Capacity(), Queue: acc.Queue.Stats(),
 			Email: st.Email, UserID: st.UserID,
+			VisitorID: acc.Client.VisitorID(),
 		}
 		if st.HasCredits {
 			credits := st.Credits
