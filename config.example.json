@@ -6,6 +6,8 @@
   "_comment_public_base": "成片出口基址。填了才会把上游直链换成本服务地址（{public_base}/v/{id}.mp4），读不出任何上游信息；留空 = 原样透传上游链接（与旧行为逐字节一致）。",
   "public_base": "",
   "media_path": "/v",
+  "_comment_media_passthrough": "true = 对外 video_url 直接给**上游地址**（本服务不中转成片带宽）；/v/ 端点仍保留，历史链接不失效。false = 改写成本服务地址。",
+  "media_passthrough": false,
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "task_store": {
