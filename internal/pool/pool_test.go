@@ -532,6 +532,57 @@ func TestRemoveAndToggleUseActualSpecPath(t *testing.T) {
 }
 
 // 额度耗尽必须换来"长冷却"，而不是 30 秒后又回去撞同一堵墙。
+// 解冻必须清掉**所有**不健康标记并换标识：只清冷却会立刻再撞同一堵墙
+// （额度记在标识上，旧标识已经用尽）。
+func TestThawClearsCooldownAndRotatesVisitor(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "acc1")
+	defer p.Close()
+
+	p.ReportFailure("acc1", errors.New("ai.minimaxH3: MINIMAX_H3_FREE_DAILY_LIMIT"))
+	acc, ok := p.Account("acc1")
+	if !ok {
+		t.Fatal("account missing")
+	}
+	acc.mu.Lock()
+	if acc.state.CooldownUntil == 0 {
+		acc.mu.Unlock()
+		t.Fatal("setup: a quota failure must put the account into cooldown")
+	}
+	acc.state.FailCount = 3
+	acc.state.Captcha = true
+	acc.state.CaptchaUntilMs = time.Now().Add(time.Hour).UnixMilli()
+	acc.mu.Unlock()
+
+	id, err := p.Thaw("acc1")
+	if err != nil {
+		t.Fatalf("Thaw: %v", err)
+	}
+	if len(id) != 32 {
+		t.Errorf("visitor id = %q (len %d), want 32 hex chars", id, len(id))
+	}
+	for _, v := range p.Snapshot() {
+		if v.Name != "acc1" {
+			continue
+		}
+		if v.CooldownUntilMs != 0 {
+			t.Errorf("cooldown = %d, want cleared", v.CooldownUntilMs)
+		}
+		if v.CaptchaUntilMs != 0 {
+			t.Errorf("captcha_until = %d, want cleared", v.CaptchaUntilMs)
+		}
+		if v.FailCount != 0 {
+			t.Errorf("fail_count = %d, want 0", v.FailCount)
+		}
+		if v.VisitorID != id {
+			t.Errorf("visitor_id = %q, want %q", v.VisitorID, id)
+		}
+		if !v.Enabled {
+			t.Error("thaw must not disable the account")
+		}
+	}
+}
+
 // 轮换设备标识必须**落盘**，否则重启后又回到共享默认值，整池额度再次合并。
 func TestRotateVisitorIDPersistsToSpecFile(t *testing.T) {
 	dir := t.TempDir()

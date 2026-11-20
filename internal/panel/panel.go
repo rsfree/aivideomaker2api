@@ -515,6 +515,14 @@ func (p *panel) handleAccountAction(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case action == "thaw" && r.Method == http.MethodPost:
+		// 手动解冻：清冷却 + 换设备标识。额度记在标识上，只清冷却等于白点。
+		id, err := p.deps.Pool.Thaw(name)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "visitor_id": id})
 	case action == "probe" && r.Method == http.MethodPost:
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)

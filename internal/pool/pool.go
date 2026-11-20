@@ -735,6 +735,38 @@ func (p *Pool) RotateVisitorID(name string) (string, error) {
 	return id, nil
 }
 
+// Thaw 手动"解冻"一个账号：清掉冷却 / 闸门 / 失败计数，并换一个新的设备标识。
+//
+// 为什么解冻**必须**连带轮换 visitorId：额度记在标识上（实测），只清冷却会立刻
+// 再撞同一堵墙 —— 按钮看起来点了、实际没用。解冻的语义就是"给它一份新的可用额度"，
+// 所以两件事必须一起做。
+func (p *Pool) Thaw(name string) (string, error) {
+	acc, ok := p.Account(name)
+	if !ok {
+		return "", fmt.Errorf("account %s not found", name)
+	}
+	id := NewVisitorID()
+	acc.Client.SetVisitorID(id)
+	if acc.specPath != "" {
+		if err := writeVisitorID(acc.specPath, id); err != nil {
+			p.logf("[pool] 账号 %s 解冻时 visitor_id 落盘失败（仅本次进程内有效）：%v", name, err)
+		}
+	}
+	acc.mu.Lock()
+	acc.state.VisitorID = id
+	acc.state.QuotaRotations++
+	acc.state.CooldownUntil = 0
+	acc.state.Captcha = false
+	acc.state.CaptchaUntilMs = 0
+	acc.state.QuotaHits = 0
+	acc.state.FailCount = 0
+	acc.state.LastError = ""
+	acc.mu.Unlock()
+	p.saveState()
+	p.logf("[pool] 账号 %s 手动解冻 ⇒ 新设备标识 %s", name, id)
+	return id, nil
+}
+
 // writeVisitorID 把新的设备标识写回 auths/<name>.json。
 //
 // 必须**读改写整份文件**：那里还有 cookie / enabled / note 等字段，

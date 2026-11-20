@@ -155,6 +155,43 @@ func TestPanelLoginFlow(t *testing.T) {
 	}
 }
 
+// 解冻按钮是"冷却中的号唯一的出路"：接口必须真的换掉设备标识并回传新值。
+func TestAccountThawRotatesVisitorID(t *testing.T) {
+	h, _ := newPanel(t, "")
+
+	_, before := panelDo(t, h, http.MethodGet, "/panel/api/accounts", "")
+	prev := ""
+	for _, raw := range before["accounts"].([]any) {
+		if acc, _ := raw.(map[string]any); acc["name"] == "acc1" {
+			prev, _ = acc["visitor_id"].(string)
+		}
+	}
+
+	code, out := panelDo(t, h, http.MethodPost, "/panel/api/accounts/acc1/thaw", "")
+	if code != http.StatusOK {
+		t.Fatalf("thaw status = %d (%v)", code, out)
+	}
+	id, _ := out["visitor_id"].(string)
+	if len(id) != 32 {
+		t.Fatalf("visitor_id = %q, want 32 hex chars", id)
+	}
+	if id == prev {
+		t.Errorf("visitor_id unchanged (%q): thaw must rotate it, otherwise the account "+
+			"immediately hits the same quota wall again", id)
+	}
+
+	_, after := panelDo(t, h, http.MethodGet, "/panel/api/accounts", "")
+	for _, raw := range after["accounts"].([]any) {
+		acc, _ := raw.(map[string]any)
+		if acc["name"] != "acc1" {
+			continue
+		}
+		if acc["visitor_id"] != id {
+			t.Errorf("snapshot visitor_id = %v, want %q", acc["visitor_id"], id)
+		}
+	}
+}
+
 func TestPanelOverviewAndTasks(t *testing.T) {
 	handler, _ := newPanel(t, "")
 	rec := httptest.NewRecorder()

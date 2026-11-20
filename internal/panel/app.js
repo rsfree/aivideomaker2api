@@ -116,6 +116,13 @@ function accountRow(acc, todayByAccount) {
       class: 'btn tiny', type: 'button', dataset: { action: 'probe', name: acc.name }, text: '探测',
     }),
     document.createTextNode(' '),
+    // 解冻 = 清冷却 + 换设备标识。冷却中的号本来就是"启用"状态，它缺的不是启用开关，
+    // 而是"立刻给它一份新额度"的动作 —— 这就是这个按钮。
+    el('button', {
+      class: 'btn tiny', type: 'button', dataset: { action: 'thaw', name: acc.name }, text: '解冻',
+      title: '清除冷却/闸门并换一个新设备标识（免费额度按设备标识计量）',
+    }),
+    document.createTextNode(' '),
     el('button', {
       class: 'btn tiny danger', type: 'button', dataset: { action: 'remove', name: acc.name }, text: '删除',
     }),
@@ -425,6 +432,9 @@ document.getElementById('accountsBody').addEventListener('click', async (event) 
       const enabled = btn.dataset.enabled !== 'true';
       await api('accounts/' + encodeURIComponent(name) + '/toggle', { method: 'POST', body: { enabled } });
       toast(enabled ? '已启用 ' + name : '已停用 ' + name);
+    } else if (btn.dataset.action === 'thaw') {
+      const res = await api('accounts/' + encodeURIComponent(name) + '/thaw', { method: 'POST' });
+      toast(name + ' 已解冻，新设备标识 ' + String(res.visitor_id || '').slice(0, 8) + '…');
     } else if (btn.dataset.action === 'probe') {
       await api('accounts/' + encodeURIComponent(name) + '/probe', { method: 'POST' });
       toast('探测已开始：' + name);
