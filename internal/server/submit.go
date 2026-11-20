@@ -74,10 +74,20 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 	// 重试零副作用；而池里通常还有别的号。上限 3 次，避免把整池号在一条请求里跑穿。
 	const maxQuotaSwitches = 3
 
+	// 网络类失败的重试计数器。单独计数而不是复用 attempt：两类错误混在一个额度里，
+	// 一次网络抖动就会挤掉本该给"额度耗尽换号"的机会。
+	transports, timeouts := 0, 0
+
 	// 素材只转存一次：上传目标是站点 CDN（全局可读），换号不需要重传。
 	// 若上游后续证明 CDN 链接是账号级的，这里要改成"每次换号重传"。
+	//
+	// 运行期重试走的是同一条路：WebParams 已在首次提交时落盘（含转存后的 CDN 地址），
+	// 这里直接复用 —— 重传一次既慢，又会给同一份素材在站点侧多存一份。
 	params := plan.WebParams
-	rehosted := false
+	rehosted := entry.Rehosted && len(entry.WebParams) > 0
+	if rehosted {
+		params = entry.WebParams
+	}
 	// quotaNotes 收集换号过程中的**真实原因**。最后那次失败往往是
 	// "all enabled accounts are cooling down"—— 那是结果，不是原因；
 	// 不把前面的原因带上，面板上就只剩一句无用的结论（生产截图暴露）。
@@ -149,6 +159,40 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 			release()
 			s.pool.ReportFailure(account.Name, err)
 
+			// ① 连接层失败（拒绝连接 / DNS / 握手）：请求**明确没送达**，上游不可能
+			// 已经建任务 ⇒ 退避 + 换号重试是最安全的一类。
+			if upstream.IsTransportFailure(err) && transports < s.cfg.TransportRetries && ctx.Err() == nil {
+				transports++
+				backoff := retryBackoff(transports, s.cfg.SubmitRetryBackoff)
+				s.recordSubmitFailure(entry, "submit", "web", err.Error())
+				s.log.Warn("transport failure, backing off then retrying",
+					"task", entry.ID, "account", account.Name,
+					"attempt", transports, "backoff", backoff.String(), "err", err)
+				if !sleepCtx(ctx, backoff) {
+					s.markFailed(entry.ID, withQuotaCause(err))
+					return
+				}
+				quotaNotes = append(quotaNotes, fmt.Sprintf("%s: %v", account.Name, err))
+				continue
+			}
+
+			// ② 读超时（请求已发出、没等到响应）：上游**可能已经建了任务**。
+			// 默认不重试（cfg.TimeoutRetries=0）；显式开启时如实标注"可能重复"。
+			if upstream.IsSubmitTimeout(err) && timeouts < s.cfg.TimeoutRetries && ctx.Err() == nil {
+				timeouts++
+				backoff := retryBackoff(timeouts, s.cfg.SubmitRetryBackoff)
+				s.recordSubmitFailure(entry, "submit", "web", err.Error())
+				s.log.Warn("submit timed out; the upstream may have created a task — retrying anyway (a duplicate is possible)",
+					"task", entry.ID, "account", account.Name,
+					"attempt", timeouts, "backoff", backoff.String(), "err", err)
+				if !sleepCtx(ctx, backoff) {
+					s.markFailed(entry.ID, withQuotaCause(err))
+					return
+				}
+				quotaNotes = append(quotaNotes, fmt.Sprintf("%s: %v", account.Name, err))
+				continue
+			}
+
 			// 并发槽位满：上游回 500 + "The queue is full. The pro plan can only run 4
 			// task at a time."。槽位一空就自愈，且明确没接单 ⇒ 换号重试零副作用。
 			if upstream.IsQueueFull(err) && attempt < maxQuotaSwitches && ctx.Err() == nil {
@@ -183,6 +227,9 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 			e.Account = account.Name
 			e.SubmittedAtMs = time.Now().UnixMilli()
 			e.Status = "queued"
+			// 落盘"实际发出去的参数"：运行期失败要能原样重提，素材不必再转存。
+			e.WebParams = params
+			e.Rehosted = rehosted
 		}); err != nil {
 			s.log.Error("persist upstream task id failed", "task", entry.ID, "err", err)
 		}
@@ -565,4 +612,37 @@ func forcedWeb(plan *translate.Plan) bool {
 		return false
 	}
 	return strings.EqualFold(jsonx.String(plan.WebParams["channel"]), "web")
+}
+
+// retryBackoff 返回第 n 次重试的退避时长：base、2×base、4×base… 封顶 8s。
+//
+// 封顶很小是刻意的：这类重试发生在**同步提交路径**上，调用方正等着 POST 返回；
+// 退避再长就成了"我们把超时转嫁给调用方"。
+func retryBackoff(n int, base time.Duration) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	if n <= 0 {
+		return 0
+	}
+	d := base << (n - 1)
+	if max := 8 * time.Second; d > max {
+		d = max
+	}
+	return d
+}
+
+// sleepCtx 等待 d，ctx 先结束就返回 false（调用方据此放弃重试，而不是硬等）。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

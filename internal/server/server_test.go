@@ -31,6 +31,10 @@ type fakeSite struct {
 	// gateAfter > 0：前 gateAfter 次闸门探测说"关"，之后说"开"（模拟速率型翻转）。
 	gateAfter int32
 	gateHits  int32
+	// taskStatuses 是 model.getModel 依次返回的终态（用完后固定最后一个）。
+	// 用来验证"运行期失败 → 自动重提一次 → 第二次成功"这条链路。
+	taskStatuses []string
+	taskGets     int32
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -84,8 +88,16 @@ func newFakeSite(t *testing.T) *fakeSite {
 		writeEnvelope(w, "up-task-1")
 	})
 	mux.HandleFunc("/api/model.getModel", func(w http.ResponseWriter, r *http.Request) {
+		status := "succeed"
+		if len(fs.taskStatuses) > 0 {
+			i := int(atomic.AddInt32(&fs.taskGets, 1)) - 1
+			if i >= len(fs.taskStatuses) {
+				i = len(fs.taskStatuses) - 1
+			}
+			status = fs.taskStatuses[i]
+		}
 		writeEnvelope(w, map[string]any{
-			"id": "up-task-1", "taskStatus": "succeed",
+			"id": "up-task-1", "taskStatus": status,
 			"url":     "https://static2.img2video.ai/abc_0_minimax_h3.mp4",
 			"aiModel": "minimax_h3", "kelingKeyId": "480", "paid": false, "credits": 1, "duration": "5",
 		})
@@ -1026,3 +1038,147 @@ func TestHealthzMinterConfiguredFalseByDefault(t *testing.T) {
 		t.Errorf("minter = %v, want configured=false endpoints=0", minter)
 	}
 }
+
+// ---------------------------------------------------------------- retry --
+
+// TestRuntimeFailureRetriesOnce 钉住"运行期失败 → 退避后重提一次"。
+//
+// 直接构造一条 failed 记录来驱动，不走 HTTP 提交：完整链路的时序依赖 Queue.Watch
+// 的轮询节奏，会让测试变成"偶尔红"的定时炸弹 —— 这里要验的是**重试逻辑**本身。
+func TestRuntimeFailureRetriesOnce(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.RuntimeRetries = 1
+		c.RuntimeBackoff = 20 * time.Millisecond
+	}, "")
+
+	_ = h.store.Put(&store.Entry{
+		ID: "t-1", TaskID: "up-old", Account: "acc1", Status: "failed",
+		Upstream: "web", Model: "minimaxH3", CreatedAtMs: time.Now().UnixMilli(),
+		WebParams: map[string]any{
+			"procedure": "ai.minimaxH3", "content": "a cat", "duration": 5, "resolution": "480p",
+		},
+	})
+
+	h.server.scheduleRuntimeRetry("t-1")
+
+	// 排程后立刻就能看到记账（幂等保护就是靠这个状态）。
+	if e, _ := h.store.Get("t-1"); e.Retries != 1 || e.RetryOf != "up-old" {
+		t.Fatalf("retries=%d retry_of=%q, want 1 / up-old", e.Retries, e.RetryOf)
+	}
+
+	// 退避之后必须**真的重提**：TaskID 从空变回一个上游 id。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		e, _ := h.store.Get("t-1")
+		if e.TaskID != "" {
+			if e.Status != "queued" {
+				t.Errorf("status = %q, want queued after the retry was submitted", e.Status)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the retry was scheduled but never submitted")
+}
+
+// TestRuntimeRetryIsIdempotent 钉住"同一条失败只重提一次"。
+//
+// 轮询与 reaper 会并发走到同一个终态 —— 没有原子保护就会重提 N 次，
+// 那是真事故：额度、闸门计数、上游负载一起放大，而成功率一点没变。
+func TestRuntimeRetryIsIdempotent(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.RuntimeRetries = 1
+		c.RuntimeBackoff = 10 * time.Millisecond
+	}, "")
+	_ = h.store.Put(&store.Entry{
+		ID: "t-2", TaskID: "up-old", Account: "acc1", Status: "failed",
+		Upstream: "web", Model: "minimaxH3", CreatedAtMs: time.Now().UnixMilli(),
+		WebParams: map[string]any{"procedure": "ai.minimaxH3", "content": "a cat"},
+	})
+	// 并发触发 8 次，模拟 8 个轮询同时看到 failed。
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.server.scheduleRuntimeRetry("t-2")
+		}()
+	}
+	wg.Wait()
+
+	e, _ := h.store.Get("t-2")
+	if e.Retries != 1 {
+		t.Errorf("retries = %d, want exactly 1 (concurrent polls must not double-schedule)", e.Retries)
+	}
+}
+
+// TestRuntimeRetrySkipsOfficialAndUnprepared 钉住两个"绝不能重试"的边界：
+// 官方通路（每单扣钱）与没有可复用参数（猜请求比失败更糟）。
+func TestRuntimeRetrySkipsOfficialAndUnprepared(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.RuntimeRetries = 1
+		c.RuntimeBackoff = time.Millisecond
+	}, "")
+
+	_ = h.store.Put(&store.Entry{
+		ID: "official", TaskID: "off-1", Status: "failed", Upstream: "official",
+		WebParams: map[string]any{"content": "x"},
+	})
+	h.server.scheduleRuntimeRetry("official")
+	if e, _ := h.store.Get("official"); e.Retries != 0 || e.Status != "failed" {
+		t.Errorf("official task was retried (retries=%d status=%s) —— it bills on every call", e.Retries, e.Status)
+	}
+
+	_ = h.store.Put(&store.Entry{ID: "no-params", TaskID: "up-2", Status: "failed", Upstream: "web"})
+	h.server.scheduleRuntimeRetry("no-params")
+	if e, _ := h.store.Get("no-params"); e.Retries != 0 || e.Status != "failed" {
+		t.Errorf("task without prepared params was retried (retries=%d status=%s)", e.Retries, e.Status)
+	}
+}
+
+// TestRetryBackoffGrowsAndCaps 守住退避曲线：1s、2s、4s… 封顶 8s。
+func TestRetryBackoffGrowsAndCaps(t *testing.T) {
+	base := time.Second
+	for n, want := range map[int]time.Duration{0: 0, 1: 1 * time.Second, 2: 2 * time.Second, 3: 4 * time.Second, 4: 8 * time.Second, 9: 8 * time.Second} {
+		if got := retryBackoff(n, base); got != want {
+			t.Errorf("retryBackoff(%d) = %s, want %s", n, got, want)
+		}
+	}
+}
+
+// TestTransportFailureVsSubmitTimeout 守住"重试安全性"的分类边界。
+//
+// 连接层失败 = 请求没送达（安全重试）；读超时 = 上游可能已建任务（默认不重试）。
+// 两者混在一起会让"安全的那类"也背上重复建任务的嫌疑。
+func TestTransportFailureVsSubmitTimeout(t *testing.T) {
+	transport := []string{
+		`Post "https://aivideomaker.ai/api/ai.minimaxH3": dial tcp 1.2.3.4:443: connect: connection refused`,
+		`Post "https://x": dial tcp: lookup aivideomaker.ai on 127.0.0.53:53: no such host`,
+		`Post "https://x": tls handshake timeout`,
+	}
+	for _, msg := range transport {
+		err := fmt.Errorf("ai.minimaxH3: %s", msg)
+		if !upstreamIsTransport(err) {
+			t.Errorf("must be classified as transport failure: %s", msg)
+		}
+		if upstreamIsTimeout(err) {
+			t.Errorf("transport failure must not be classified as submit timeout: %s", msg)
+		}
+	}
+	timeouts := []string{
+		`ReadTimeout: Post "https://aivideomaker.ai/api/ai.minimaxH3?batch=1": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+	}
+	for _, msg := range timeouts {
+		err := fmt.Errorf("ai.minimaxH3: %s", msg)
+		if !upstreamIsTimeout(err) {
+			t.Errorf("must be classified as submit timeout: %s", msg)
+		}
+		if upstreamIsTransport(err) {
+			t.Errorf("submit timeout must not be classified as transport failure: %s", msg)
+		}
+	}
+}
+
+// 小别名：本文件的断言只关心分类结果。
+func upstreamIsTransport(err error) bool { return upstream.IsTransportFailure(err) }
+func upstreamIsTimeout(err error) bool   { return upstream.IsSubmitTimeout(err) }

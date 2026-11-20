@@ -293,6 +293,8 @@ func (s *Server) taskView(ctx context.Context, entry *store.Entry) (map[string]a
 							"upstream_task", entry.TaskID, "usage", usage)
 					}
 				}
+				// 运行期失败：退避后换号重提一次（条件与保护见 retry.go）。
+				s.scheduleRuntimeRetry(entry.ID)
 			}
 		}
 		s.cache.put(entry.ID, view, pollTTL(entry, status))

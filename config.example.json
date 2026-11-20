@@ -22,12 +22,16 @@
     "write_timeout": "0s"
   },
   "submit": {
-    "_comment": "受理/推进分离：POST 毫秒级返回 id，转存/等槽位/create 在后台做。lease 是「判定推进 goroutine 已死」的时限（要大于 转存 120s + 等槽位 600s + 铸 token 45s 的和）。retries 只对「上游确定没接单」的失败生效（queue is full / 429 闸门 / 连接类错误）—— 这条线没有幂等键，重发可能重复建任务。inline 只给测试用，生产误开等于关掉「受理即返」。",
+    "_comment": "受理/推进分离：POST 毫秒级返回 id，转存/等槽位/create 在后台做。lease 是「判定推进 goroutine 已死」的时限。retries/retry_backoff 是 upstream 客户端内部的重试。transport_retries = 连接层失败（拒绝连接/DNS/握手）的换号重试，请求确实没送达，安全；timeout_retries = 读超时重试，**默认 0**：上游可能已建任务，重试会造出第二条（免费档吃额度、付费档重复扣费）；runtime_retries = 任务在上游运行期失败（只回 status=failed 不给原因）后的自动重提次数，默认 1 次 + runtime_backoff 退避。inline 只给测试用，生产误开等于关掉「受理即返」。",
     "workers": 32,
     "lease": "1200s",
     "retries": 2,
     "retry_backoff": "3s",
-    "inline": false
+    "inline": false,
+    "transport_retries": 1,
+    "timeout_retries": 0,
+    "runtime_retries": 1,
+    "runtime_backoff": "10s"
   },
   "queue": {
     "_comment": "max_in_flight = 0 表示按账号额度自动（读 ai.queryUserPermission.maxQueueLength：premium 2 / pro 4，读不到回落 2）。想要「每号打满」就保持 0 并让一个号只被一个实例使用。acquire_timeout 是等空槽的总预算；watch_timeout 是盯到终态的时限。",

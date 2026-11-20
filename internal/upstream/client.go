@@ -724,6 +724,63 @@ func IsQueueFull(err error) bool {
 	return false
 }
 
+// transportFailureMarkers 是"请求**确实没送达**"的连接层措辞。
+//
+// 这类失败可以放心重试：上游没收到请求，不可能已经建了任务。
+var transportFailureMarkers = []string{
+	"connection refused",
+	"no such host",
+	"dial tcp", // 包含 dial 阶段的 i/o timeout
+	"network is unreachable",
+	"tls handshake timeout",
+	"connect: cannot assign",
+}
+
+// submitTimeoutMarkers 是"请求已发出、但没等到响应"的措辞。
+//
+// 🔴 与上面那组的区别是**有没有可能已经建任务**：
+//   - 连接层失败 ⇒ 明确没送到，重试零副作用；
+//   - 读超时     ⇒ 上游可能已受理，重试会造出**第二条任务**（免费档不花钱，但吃额度
+//     和闸门计数）。默认策略是不重试，要开得显式配置。
+var submitTimeoutMarkers = []string{
+	"readtimeout",
+	"timeout awaiting response headers",
+	"client.timeout exceeded",
+	"context deadline exceeded",
+	"i/o timeout",
+}
+
+// IsTransportFailure 判断失败是否发生在"请求还没送出去"的连接层。
+func IsTransportFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	blob := strings.ToLower(err.Error())
+	for _, marker := range transportFailureMarkers {
+		if strings.Contains(blob, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSubmitTimeout 判断失败是否属于"请求已发出、但没等到响应"。
+//
+// 注意它**不包含**连接层失败（那些由 IsTransportFailure 管）：两类的重试安全性
+// 完全不同，混在一起会让"明确没送达"也背上"可能重复建任务"的嫌疑。
+func IsSubmitTimeout(err error) bool {
+	if err == nil || IsTransportFailure(err) {
+		return false
+	}
+	blob := strings.ToLower(err.Error())
+	for _, marker := range submitTimeoutMarkers {
+		if strings.Contains(blob, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsParameterLike 判断失败是否来自请求体形状（而不是账号状态）。
 func IsParameterLike(err error) bool {
 	if err == nil {

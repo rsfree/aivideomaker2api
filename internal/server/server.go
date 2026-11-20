@@ -68,6 +68,12 @@ type Config struct {
 	// 判断"接没接"**，不参与控制流；真正的客户端在 upstream.Client 上。
 	// 存地址而不是 bool：多实例部署时端点数量是运维判断冗余度的最小信息。
 	MinterURL string
+	// 重试参数（语义见 config.SubmitConfig 里同名字段的注释）。
+	TransportRetries   int
+	TimeoutRetries     int
+	RuntimeRetries     int
+	RuntimeBackoff     time.Duration
+	SubmitRetryBackoff time.Duration
 	// History 是调试/提交账本（可空）。
 	History *debughist.Recorder
 	// PanelHandler 挂在 /panel 下（nil = 不启用面板）。

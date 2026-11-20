@@ -116,6 +116,25 @@ type SubmitConfig struct {
 	Lease        Duration `json:"lease"`
 	Retries      int      `json:"retries"`
 	RetryBackoff Duration `json:"retry_backoff"`
+
+	// TransportRetries 是"连接层失败"（拒绝连接 / DNS / 握手）的换号重试次数。
+	// 这类失败**明确没送达**，重试零副作用，默认开 1 次。
+	TransportRetries int `json:"transport_retries"`
+	// TimeoutRetries 是"请求已发出但没等到响应"（ReadTimeout）的换号重试次数。
+	//
+	// 🔴 默认 **0（关闭）**：上游很可能已经建了任务，重试会造出第二条。
+	// 免费档不花钱，但要吃一次额度 + 一次闸门计数；付费档就是实打实的重复扣费。
+	// 站点没有任何幂等键可供去重（`model.listModel` 只返回已成功的记录，查不到在途），
+	// 所以这个开关是**风险自担**的。
+	TimeoutRetries int `json:"timeout_retries"`
+	// RuntimeRetries 是任务在**上游运行期**失败（上游接了单、跑完回 failed）后的自动重提次数。
+	//
+	// 这类失败站点只给 `status=failed`，不给原因，其中混着运行时内容审核 ——
+	// 那种重试必然再失败，还会多烧一次额度。所以上限默认只给 1 次：
+	// 一次是"救抖动"，两次以上就是"放大失败"。
+	RuntimeRetries int      `json:"runtime_retries"`
+	RuntimeBackoff Duration `json:"runtime_backoff"`
+
 	// Inline 让推进侧同步执行（只给测试/本地调试；生产误开等于关掉"受理即返"）。
 	Inline bool `json:"inline"`
 }
@@ -191,14 +210,23 @@ func Default() Config {
 		StateFile: "./data/state.json",
 		TaskStore: TaskStoreConfig{Path: "./data/tasks.jsonl", RetentionDays: 7, CacheTTL: Duration(15 * time.Second)},
 		Server:    ServerConfig{ReadTimeout: Duration(300 * time.Second)},
-		Submit:    SubmitConfig{Workers: 32, Lease: Duration(1200 * time.Second), Retries: 2, RetryBackoff: Duration(3 * time.Second)},
-		Queue:     QueueConfig{AcquireTimeout: Duration(600 * time.Second), PollInterval: Duration(10 * time.Second), WatchTimeout: Duration(3600 * time.Second)},
-		Upstream:  UpstreamConfig{Timeout: Duration(120 * time.Second), ProbeTimeout: Duration(8 * time.Second), TrustEnv: true, MediaFetchTimeout: Duration(30 * time.Second), MediaRehostBudget: Duration(120 * time.Second), MediaRetries: 2, RehostWorkers: 7, CaptchaProbeTTL: Duration(5 * time.Second), MediaReadTimeout: Duration(60 * time.Second)},
-		Minter:    MinterConfig{Timeout: Duration(25 * time.Second), Retries: 1, Reserve: 8},
-		Official:  OfficialConfig{BaseURL: "https://aivideomaker.ai", Timeout: Duration(60 * time.Second)},
-		Pool:      PoolConfig{ProbeInterval: Duration(300 * time.Second)},
-		Panel:     PanelConfig{Enabled: true},
-		Logging:   LoggingConfig{Level: "info"},
+		Submit: SubmitConfig{
+			Workers: 32, Lease: Duration(1200 * time.Second), Retries: 2, RetryBackoff: Duration(3 * time.Second),
+			// 连接层失败（拒绝连接/DNS/握手）可以放心重试：请求确实没送达。
+			TransportRetries: 1,
+			// 读超时**默认不重试**：上游可能已建任务，重试会造出第二条（详见字段注释）。
+			TimeoutRetries: 0,
+			// 运行期失败重提 1 次 + 10s 退避。
+			RuntimeRetries: 1,
+			RuntimeBackoff: Duration(10 * time.Second),
+		},
+		Queue:    QueueConfig{AcquireTimeout: Duration(600 * time.Second), PollInterval: Duration(10 * time.Second), WatchTimeout: Duration(3600 * time.Second)},
+		Upstream: UpstreamConfig{Timeout: Duration(120 * time.Second), ProbeTimeout: Duration(8 * time.Second), TrustEnv: true, MediaFetchTimeout: Duration(30 * time.Second), MediaRehostBudget: Duration(120 * time.Second), MediaRetries: 2, RehostWorkers: 7, CaptchaProbeTTL: Duration(5 * time.Second), MediaReadTimeout: Duration(60 * time.Second)},
+		Minter:   MinterConfig{Timeout: Duration(25 * time.Second), Retries: 1, Reserve: 8},
+		Official: OfficialConfig{BaseURL: "https://aivideomaker.ai", Timeout: Duration(60 * time.Second)},
+		Pool:     PoolConfig{ProbeInterval: Duration(300 * time.Second)},
+		Panel:    PanelConfig{Enabled: true},
+		Logging:  LoggingConfig{Level: "info"},
 	}
 }
 

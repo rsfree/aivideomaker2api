@@ -64,6 +64,21 @@ type Entry struct {
 	// 而本项目的第一号红线就是计费，答不出"花没花"等于红线失守。
 	Usage map[string]any `json:"usage,omitempty"`
 
+	// WebParams 是**实际发给上游的那份参数**（素材已转存到站点 CDN）。
+	//
+	// 为什么要落盘：运行期失败（上游接了单但跑挂了）要能自动重提，而重提必须复用
+	// 同一份素材 —— 原始请求里的外链可能已经失效、转存又是一次额外上传。
+	// 它是内部字段，不出现在任何响应视图里。
+	WebParams map[string]any `json:"web_params,omitempty"`
+	// Rehosted 表示 WebParams 里的素材已经转存过，重试时不必再传一遍。
+	Rehosted bool `json:"rehosted,omitempty"`
+	// Retries 是"运行期失败后重提"的累计次数（上限由 retry.runtime_retries 决定）。
+	// 单独计数而不是复用其它字段：它决定"还能不能救"，与失败次数是两件事。
+	Retries int `json:"retries,omitempty"`
+	// RetryOf 是重提覆盖掉的那个上游任务 id，纯审计用 —— 一次调用可能对应两条上游任务，
+	// 不留痕的话"为什么上游账单比调用数多"永远解释不了。
+	RetryOf string `json:"retry_of,omitempty"`
+
 	// SourceURL 是成片的上游直链。**只在内部使用**，绝不进响应体
 	// （对外给的是本服务自己的下载地址，见 media 包）。
 	SourceURL     string `json:"source_url,omitempty"`
