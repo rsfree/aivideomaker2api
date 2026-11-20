@@ -220,6 +220,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 上次进程留下的"进行中"任务先对一次上游：容器重启（部署就是一次重启）会让
+	// 盯梢 goroutine 全部消失，而 store 里的记录还停在 queued —— 不补这次，
+	// 面板会永远显示"排队"，调用方也以为任务还在跑。
+	srv.ResumeInflight()
+	// 再挂个低频回收器，兜住"只提交不轮询"的调用方。
+	srv.StartInflightReaper(60 * time.Second)
+
 	logStartup(cfg, logger, p.Count(), proxy.Enabled(), minter)
 
 	shutdownDone := make(chan struct{})

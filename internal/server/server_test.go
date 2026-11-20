@@ -826,6 +826,34 @@ func TestSubmitSwitchesAccountOnQuotaExhausted(t *testing.T) {
 	}
 }
 
+// 重启后必须把"进行中"的任务对回上游状态 —— 否则面板永远显示"排队"。
+//
+// 生产现场（2026-11-20 17:47 部署）：两条 17:42 提交的任务在重启后一直 queued，
+// 实际上游 17:45 就出片了。原因是终态写回只在 GET /tasks/{id} 时发生，
+// 盯梢 goroutine 随进程重启消失后，没人再来问。
+func TestResumeInflightAdvancesQueuedTask(t *testing.T) {
+	h := newHarness(t, nil, "")
+	// 造一条"上次进程留下"的记录：已拿到上游 id，但状态还停在 queued。
+	_ = h.store.Put(&store.Entry{
+		ID: "cgt-restart", Model: "minimaxH3", Upstream: "web", Status: "queued",
+		Account: "acc1", TaskID: "up-task-1", CreatedAtMs: time.Now().UnixMilli(),
+	})
+
+	h.server.ResumeInflight()
+
+	entry, ok := h.store.Get("cgt-restart")
+	if !ok {
+		t.Fatal("task disappeared")
+	}
+	if entry.Status != "succeeded" {
+		t.Errorf("status = %q, want succeeded (the reaper must write the upstream terminal state back)",
+			entry.Status)
+	}
+	if entry.VideoURL == "" {
+		t.Error("video_url is empty: the terminal write-back must carry the gated URL")
+	}
+}
+
 // 并发槽位满（上游 500 + "The queue is full"）必须换号，且**不能**把号打成故障冷却。
 //
 // 这是与额度耗尽的关键区分：额度耗尽要长冷却（当天不再试），并发满只要几十秒绕行

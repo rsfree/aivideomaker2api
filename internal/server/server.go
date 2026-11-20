@@ -113,6 +113,10 @@ type Server struct {
 
 	submitSem chan struct{}
 	started   time.Time
+
+	// stopCh 关闭后后台回收器退出（见 Close）。
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // New 组装路由。mediaProxy 可以为 nil（= 成片出口未配置，原样透传上游链接）。
@@ -150,6 +154,7 @@ func New(cfg Config, p *pool.Pool, st *store.Store, proxy *media.Proxy, logger *
 		cache:     newViewCache(cfg.TaskCacheTTL, 1024),
 		submitSem: make(chan struct{}, cfg.SubmitWorkers),
 		started:   time.Now(),
+		stopCh:    make(chan struct{}),
 		history:   cfg.History,
 	}
 	if cfg.Official.Enabled() {
@@ -166,6 +171,64 @@ func New(cfg Config, p *pool.Pool, st *store.Store, proxy *media.Proxy, logger *
 	}
 	s.routes()
 	return s
+}
+
+// ResumeInflight 在进程启动时把上次留下的"进行中"任务重新对上上游状态。
+//
+// 为什么必须有：部署 = 一次容器重启，所有盯梢 goroutine 随之消失，而 store 里的记录
+// 还停在 queued。终态写回原本**只在 GET /tasks/{id} 时**发生，于是没人来问就永远显示
+// "排队"。生产实测（2026-11-20）：17:47 部署后，两条 17:42 提交的任务一直显示排队，
+// 实际上游 17:45 就已经出片了 —— 运维看到的是"服务卡住"，实际只是账本没补。
+func (s *Server) ResumeInflight() {
+	s.reapInflight("startup")
+}
+
+// StartInflightReaper 周期性把"非终态但上游已结束"的记录推进到终态。
+//
+// 兜的是另一类情况：调用方只提交不轮询。没有它，这类记录会一直挂在 queued，
+// 面板上的"排队"数字只增不减，看着像队列堵了。
+func (s *Server) StartInflightReaper(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.stopCh:
+				return
+			case <-t.C:
+				s.reapInflight("reaper")
+			}
+		}
+	}()
+}
+
+// Close 停掉后台回收器（不影响已提交的任务，它们仍在上游跑）。
+func (s *Server) Close() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
+}
+
+func (s *Server) reapInflight(why string) {
+	for _, e := range s.store.List(0, 0, "") {
+		if terminalStatus[e.Status] {
+			continue
+		}
+		if e.Upstream == "official" && s.official == nil {
+			continue
+		}
+		// 必须绕过视图缓存：缓存里很可能正是那条 `queued` 的旧值，
+		// 不清掉就会"扫了一圈、什么都没变"。
+		s.cache.drop(e.ID)
+		// 只补"上游已经有 id"的记录：没有 id 的那类由 taskView 自己按租约判失败，
+		// 这里调用它就是为了触发那段逻辑。
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if _, err := s.taskView(ctx, e); err != nil {
+			s.log.Warn("inflight refresh failed", "task", e.ID, "why", why, "err", err)
+		}
+		cancel()
+	}
 }
 
 func (s *Server) routes() {
