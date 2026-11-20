@@ -16,6 +16,8 @@ services:
       - AVM2_PANEL_PASSWORD=${AVM2_PANEL_PASSWORD:-}
       # 对外可访问的本服务地址；填了才会把成片直链换成本服务地址。
       - AVM2_PUBLIC_BASE=${AVM2_PUBLIC_BASE:-}
+      # 成片直链：1 = 对外直接给上游地址（不替上游扛下载带宽），/v/ 端点仍保留。
+      - AVM2_MEDIA_PASSTHROUGH=${AVM2_MEDIA_PASSTHROUGH:-0}
       # Turnstile 铸造服务。走 host 网络部署时用 host.docker.internal（compose 会自动加
       # host-gateway 映射）；留空 = 不启用，闸门翻起时如实 429。
       - AVM_MINTER_URL=${AVM_MINTER_URL:-}
