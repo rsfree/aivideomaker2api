@@ -129,9 +129,21 @@ type ModelAlias struct {
 	Duration   int    // 钉死的时长
 }
 
-// ModelAliases 是全部固定组合别名。取值与 DurationAllowed 必须一致 ——
+// Pins 表示这个别名把分辨率/时长**钉死**了。
+//
+// Resolution 与 Duration 同时为空 = **纯槽位别名**：只把名字映射到上游槽位，
+// 参数仍由请求体决定（枚举照旧校验）。这类别名存在的原因是**上游网关的计费模型**：
+// 按「模型名 + 请求体参数」计费的网关（apiduo 的 per_second × factors）必须让
+// duration/resolution 出现在**请求体**里；把参数编码进模型名会让它读不到，退回
+// 按 ratio 估算（实测预扣 $187.50，而正确值是 $0.05）。
+func (a ModelAlias) Pins() bool { return a.Resolution != "" || a.Duration > 0 }
+
+// ModelAliases 是全部别名。钉死参数的条目取值必须与 DurationAllowed 一致 ——
 // 有一条单测（TestModelAliasesStayInsideTheEnum）守着，别手工漂移。
 var ModelAliases = []ModelAlias{
+	// 纯槽位别名：给"按请求体参数计费"的网关用（minimax-h3 + duration/resolution）。
+	// 注意它必须排在固定组合别名**之前**不影响匹配（精确匹配，不互相覆盖）。
+	{Name: "minimax-h3", Slot: "minimaxH3"},
 	{"minimax-h3-480p-5s", "minimaxH3", "480p", 5},
 	{"minimax-h3-480p-10s", "minimaxH3", "480p", 10},
 	{"minimax-h3-720p-5s", "minimaxH3", "720p", 5},
@@ -426,9 +438,15 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 	baseModel := model
 	if hasAlias {
 		baseModel = alias.Slot
-		warnings = append(warnings, fmt.Sprintf(
-			`model %q is a fixed alias: %s @ %ds (resolution and duration are pinned; `+
-				"conflicting body fields are rejected)", modelRaw, alias.Resolution, alias.Duration))
+		if alias.Pins() {
+			warnings = append(warnings, fmt.Sprintf(
+				`model %q is a fixed alias: %s @ %ds (resolution and duration are pinned; `+
+					"conflicting body fields are rejected)", modelRaw, alias.Resolution, alias.Duration))
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				`model %q is an alias for upstream slot %q — resolution and duration come from the `+
+					"body (the enum is — %s)", modelRaw, alias.Slot, enumSummary()))
+		}
 	}
 	modelRes, err := slots.ResolveModel(baseModel, channelOptions, forceSlot)
 	if err != nil {
@@ -497,12 +515,12 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 	}
 
 	resolution := DefaultResolution
-	if hasAlias {
+	if hasAlias && alias.Pins() {
 		resolution = alias.Resolution
 	}
 	if raw, ok := body["resolution"]; ok && raw != nil && jsonx.String(raw) != "" {
 		r := jsonx.String(raw)
-		if hasAlias && r != alias.Resolution {
+		if hasAlias && alias.Pins() && r != alias.Resolution {
 			return nil, paramErr(fmt.Sprintf(
 				"resolution: model %q pins %s — omit the field, or use %q (request said %q)",
 				modelRaw, alias.Resolution, modelRaw, r), "resolution")
@@ -549,7 +567,7 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 			preferFree = b
 		}
 	}
-	if hasAlias {
+	if hasAlias && alias.Pins() {
 		if duration != nil && *duration != alias.Duration {
 			return nil, paramErr(fmt.Sprintf(
 				"duration: model %q pins %ds — omit the field, or use %q (request said %ds)",

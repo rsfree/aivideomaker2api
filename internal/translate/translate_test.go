@@ -580,6 +580,15 @@ func TestModelAliasesStayInsideTheEnum(t *testing.T) {
 			t.Errorf("duplicate alias %q", a.Name)
 		}
 		seen[a.Name] = true
+		// 纯槽位别名不钉死参数，没有可校验的枚举；但它必须指向一个已知槽位，
+		// 否则这个名字会静默落到别的通路（实测踩过：minimax-h3 被官方 aliases 抢走，
+		// 报 "resolution 480p is not supported by minimax"）。
+		if !a.Pins() {
+			if a.Slot == "" {
+				t.Errorf("%s: bare alias must map to a slot", a.Name)
+			}
+			continue
+		}
 		if !WebResolutions[a.Resolution] {
 			t.Errorf("%s: resolution %q is outside the web enum", a.Name, a.Resolution)
 			continue
@@ -635,5 +644,49 @@ func TestModelAliasRejectsConflictingBody(t *testing.T) {
 	body["duration"] = 8
 	if _, err := Create(body, nil, ""); err != nil {
 		t.Fatalf("matching explicit values must pass: %v", err)
+	}
+}
+
+// TestBareSlotAliasKeepsBodyParams 钉住「纯槽位别名不钉死参数」。
+//
+// 它存在的唯一理由是网关计费：apiduo 的 per_second × factors 从**请求体**读
+// duration/resolution。把参数编码进模型名（minimax-h3-480p-5s）会让它读不到，
+// 实测退回 ratio 估算 ⇒ 预扣 $187.50（正确值 $0.05）。
+func TestBareSlotAliasKeepsBodyParams(t *testing.T) {
+	// 必须落到 minimaxH3 槽位（不是官方 minimax）。
+	for _, resolution := range []string{"480p", "720p"} {
+		for _, duration := range []int{5, 8, 10} {
+			if _, err := ResolveDuration(duration, resolution); err != nil {
+				continue // 该组合本就不在枚举里
+			}
+			plan, err := Create(map[string]any{
+				"model":      "minimax-h3",
+				"content":    []any{map[string]any{"type": "text", "text": "a cat"}},
+				"resolution": resolution,
+				"duration":   duration,
+			}, nil, "")
+			if err != nil {
+				t.Fatalf("%s/%ds: %v", resolution, duration, err)
+			}
+			if got := plan.Effective["model"]; got != "minimaxH3" {
+				t.Errorf("%s/%ds: effective model = %v, want minimaxH3", resolution, duration, got)
+			}
+			if r := plan.WebParams["resolution"]; r != resolution {
+				t.Errorf("%s: body resolution lost, got %v", resolution, r)
+			}
+			if d, _ := plan.WebParams["duration"].(int); d != duration {
+				t.Errorf("%ds: body duration lost, got %v", duration, plan.WebParams["duration"])
+			}
+		}
+	}
+
+	// 越界参数仍要 400（别名不放宽枚举）。
+	if _, err := Create(map[string]any{
+		"model":      "minimax-h3",
+		"content":    []any{map[string]any{"type": "text", "text": "a cat"}},
+		"resolution": "1080p",
+		"duration":   5,
+	}, nil, ""); err == nil {
+		t.Error("minimax-h3 must still reject 1080p")
 	}
 }

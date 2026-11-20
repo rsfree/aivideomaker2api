@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -105,6 +106,33 @@ var modelCatalog = []modelInfo{
 // 这里不另写一份清单 —— 同一事实两处表达必然漂移（多一个别名、少一个枚举）。
 func init() {
 	for _, a := range translate.ModelAliases {
+		if !a.Pins() {
+			// 纯槽位别名：不钉死任何组合，枚举与槽位本身一致。
+			// 它存在的目的是给"按请求体参数计费"的网关一个干净的模型名
+			// （参数编码进模型名会让网关读不到 duration/resolution）。
+			byRes := map[string][]string{}
+			var all []string
+			seen := map[string]bool{}
+			for _, res := range translate.WebResolutionList {
+				for _, d := range translate.DurationAllowed[res] {
+					byRes[res] = append(byRes[res], strconv.Itoa(d))
+					if !seen[strconv.Itoa(d)] {
+						seen[strconv.Itoa(d)] = true
+						all = append(all, strconv.Itoa(d))
+					}
+				}
+			}
+			sort.Strings(all)
+			modelCatalog = append(modelCatalog, modelInfo{
+				ID: a.Name, Channel: "web", WebReady: true, Free: true, Credits5s: 0,
+				Resolutions:           append([]string{}, translate.WebResolutionList...),
+				Durations:             all,
+				DurationsByResolution: byRes,
+				Note: fmt.Sprintf("槽位别名：等价于 %s，分辨率与时长由请求体决定（枚举同 %s）。"+
+					"给按参数计费的网关用 —— 请求体里必须带 duration 与 resolution。", a.Slot, a.Slot),
+			})
+			continue
+		}
 		dur := strconv.Itoa(a.Duration)
 		modelCatalog = append(modelCatalog, modelInfo{
 			ID: a.Name, Channel: "web", WebReady: true, Free: true, Credits5s: 0,
