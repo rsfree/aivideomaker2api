@@ -160,6 +160,15 @@ type Pool struct {
 	accounts map[string]*Account
 	order    []string
 
+	// pickMu / pickSeq / lastPick 是**轮转选号**的记账（见 pickFrom）。
+	//
+	// 为什么不复用 mu：选号要在一段临界区里完成"排序 → 占槽 → 记账"，用 mu 会把
+	// 账号增删、面板快照一起串行化；而这三件事和轮转完全无关。
+	// 这把锁是叶子锁（内部只调 Queue.TryAcquire，不碰 mu/acc.mu），不会引出锁序问题。
+	pickMu   sync.Mutex
+	pickSeq  int64
+	lastPick map[string]int64
+
 	stateMu sync.Mutex
 	stop    chan struct{}
 	closed  chan struct{}
@@ -186,6 +195,7 @@ func New(opts Options, logf func(string, ...any)) (*Pool, error) {
 		opts:     opts,
 		logf:     logf,
 		accounts: map[string]*Account{},
+		lastPick: map[string]int64{},
 		stop:     make(chan struct{}),
 		closed:   make(chan struct{}),
 	}
@@ -320,6 +330,10 @@ func (p *Pool) addLocked(spec Spec) error {
 		Client: client, Queue: queue, cookie: cookieHeader,
 		specPath: spec.SourcePath,
 	}
+	// 把设备标识也记进 state：面板读的是 Client，但 state.json 是排障时"这个号到底
+	// 用哪个标识在跑"的唯一落盘证据。不同步会让两份数据打架（实测 state.json 里
+	// me/renee-2 的 visitor_id 为空，其实客户端有值），足够把人引到错误结论上。
+	acc.state.VisitorID = cfg.VisitorID
 	p.accounts[spec.Name] = acc
 	p.order = append(p.order, spec.Name)
 	sort.Strings(p.order)
@@ -838,10 +852,8 @@ func (p *Pool) Acquire(ctx context.Context) (*Account, error) {
 				return nil, &ErrNoAccount{Reason: msg}
 			}
 		}
-		for _, acc := range candidates {
-			if acc.Queue.TryAcquire() {
-				return acc, nil
-			}
+		if acc, ok := p.pickFrom(candidates); ok {
+			return acc, nil
 		}
 		if !announced {
 			announced = true
@@ -902,21 +914,75 @@ func (p *Pool) candidates() []*Account {
 		live = open
 	}
 
-	sort.SliceStable(live, func(i, j int) bool {
-		a, b := live[i], live[j]
-		aFree := a.Queue.InUse() < a.Queue.Capacity()
-		bFree := b.Queue.InUse() < b.Queue.Capacity()
-		if aFree != bFree {
-			return aFree
-		}
-		aRatio := loadRatio(a)
-		bRatio := loadRatio(b)
-		if aRatio != bRatio {
-			return aRatio < bRatio
-		}
-		return creditsOf(a) > creditsOf(b)
-	})
 	return live
+}
+
+// pickFrom 从存活账号里选一个并**占住它的槽位**。
+//
+// 关键：排序与占槽在**同一把锁**里完成。放开的话两个并发请求会各自读到同一份
+// "最空闲"快照，然后把同一个号一起填满 —— 均匀性在并发下直接失效。
+//
+// 排序键（顺序就是优先级）：
+//  1. 当前有空槽的优先 —— 满了的号选也没用；
+//  2. 负载率低的优先 —— 让各号水位同步上升，而不是把一个号填满再换；
+//  3. **最久没被选中的优先**（轮转）—— 这是均匀性的来源；
+//  4. 账号名字典序 —— 只为了让"全部并列"（进程刚起，所有号都没被选过）可复现。
+//
+// 🔴 为什么这里**没有** credits：
+// 旧实现把"余额降序"当最后一个排序键，看起来无害，实际是"谁余额高就一直用谁"——
+// 免费额度记在 visitorId 上，余额与免费额度毫无关系。生产实测：47 条任务里 20 条
+// 落在余额最高的那一个号上（42.5%）。流量堆在单会话上，站点的速率型 Turnstile 闸门
+// 先在这个号翻起，然后整池连环 429。
+func (p *Pool) pickFrom(cands []*Account) (*Account, bool) {
+	if len(cands) == 0 {
+		return nil, false
+	}
+	type scored struct {
+		acc   *Account
+		free  bool
+		ratio float64
+		seq   int64
+	}
+	p.pickMu.Lock()
+	defer p.pickMu.Unlock()
+
+	items := make([]scored, 0, len(cands))
+	for _, acc := range cands {
+		capacity := acc.Queue.Capacity()
+		inUse := acc.Queue.InUse()
+		ratio := 1.0
+		if capacity > 0 {
+			ratio = float64(inUse) / float64(capacity)
+		}
+		items = append(items, scored{
+			acc:   acc,
+			free:  inUse < capacity,
+			ratio: ratio,
+			seq:   p.lastPick[acc.Name],
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.free != b.free {
+			return a.free
+		}
+		if a.ratio != b.ratio {
+			return a.ratio < b.ratio
+		}
+		if a.seq != b.seq {
+			return a.seq < b.seq
+		}
+		return a.acc.Name < b.acc.Name
+	})
+	for _, it := range items {
+		if !it.acc.Queue.TryAcquire() {
+			continue
+		}
+		p.pickSeq++
+		p.lastPick[it.acc.Name] = p.pickSeq
+		return it.acc, true
+	}
+	return nil, false
 }
 
 func anyEnabled(accounts []*Account) bool {
@@ -965,14 +1031,6 @@ func earliestRecovery(accounts []*Account) time.Duration {
 		}
 	}
 	return best
-}
-
-func loadRatio(a *Account) float64 {
-	capacity := a.Queue.Capacity()
-	if capacity <= 0 {
-		return 1
-	}
-	return float64(a.Queue.InUse()) / float64(capacity)
 }
 
 func creditsOf(a *Account) int {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -756,6 +757,130 @@ func TestProbeKeepsCooldownReason(t *testing.T) {
 		}
 		if v.CooldownUntilMs <= time.Now().UnixMilli() {
 			t.Error("cooldown should still be active")
+		}
+	}
+}
+
+// TestAcquireRotatesAcrossAccounts 钉住"串行请求必须轮流"。
+//
+// 旧实现按「负载率 → 余额降序」排序：所有号都空闲时余额最高的恒排第一，于是
+// 串行流量全压在一个号上（生产实测 47 条任务里 20 条落在一个号）。均衡不是美观问题：
+// 单会话速率超限会先翻起站点的 Turnstile 闸门，然后整池连环 429。
+func TestAcquireRotatesAcrossAccounts(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "acc1", "acc2", "acc3")
+	ctx := context.Background()
+
+	var got []string
+	for i := 0; i < 9; i++ {
+		acc, err := p.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		got = append(got, acc.Name)
+		acc.Queue.Release()
+	}
+
+	counts := map[string]int{}
+	for _, name := range got {
+		counts[name]++
+	}
+	for _, name := range []string{"acc1", "acc2", "acc3"} {
+		if counts[name] != 3 {
+			t.Errorf("%s picked %d times in 9 acquisitions, want 3 (order=%v)", name, counts[name], got)
+		}
+	}
+	// 严格轮流：相邻两次不得落在同一个号上（release 之后它就又"最久没被选中"了）。
+	for i := 1; i < len(got); i++ {
+		if got[i] == got[i-1] {
+			t.Fatalf("two consecutive acquisitions went to %s (order=%v)", got[i], got)
+		}
+	}
+}
+
+// TestAcquireIgnoresCredits 钉住"余额不参与选号"。
+//
+// 免费额度记在 visitorId 上，与账号余额无关；把余额当排序键只会制造幂律分布。
+func TestAcquireIgnoresCredits(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "acc1", "acc2", "acc3")
+	rich, _ := p.Account("acc1")
+	rich.mu.Lock()
+	rich.state.Credits = 99999
+	rich.state.HasCredits = true
+	rich.mu.Unlock()
+
+	ctx := context.Background()
+	var got []string
+	for i := 0; i < 6; i++ {
+		acc, err := p.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		got = append(got, acc.Name)
+		acc.Queue.Release()
+	}
+	counts := map[string]int{}
+	for _, name := range got {
+		counts[name]++
+	}
+	if counts["acc1"] > 2 {
+		t.Errorf("high-credit account took %d of 6 acquisitions (order=%v) —— 余额不该主导选号", counts["acc1"], got)
+	}
+	for _, name := range []string{"acc1", "acc2", "acc3"} {
+		if counts[name] != 2 {
+			t.Errorf("%s picked %d times in 6 acquisitions, want 2 (order=%v)", name, counts[name], got)
+		}
+	}
+}
+
+// TestAcquireSpreadsConcurrentRequests 钉住"并发突发也要均匀"。
+//
+// 排序与占槽必须在同一临界区里：分开做的话，并发请求会各自读到同一份"最空闲"快照，
+// 然后把同一个号一起填满。
+func TestAcquireSpreadsConcurrentRequests(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPool(t, dir, "acc1", "acc2", "acc3") // 每号 2 槽 ⇒ 总容量 6
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var got []string
+	held := map[string]*Account{}
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			acc, err := p.Acquire(ctx)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				t.Errorf("concurrent acquire: %v", err)
+				return
+			}
+			got = append(got, acc.Name)
+			held[acc.Name] = acc
+		}()
+	}
+	wg.Wait()
+	defer func() {
+		for _, acc := range held {
+			for acc.Queue.InUse() > 0 {
+				acc.Queue.Release()
+			}
+		}
+	}()
+
+	counts := map[string]int{}
+	for _, name := range got {
+		counts[name]++
+	}
+	if len(got) != 6 {
+		t.Fatalf("only %d of 6 acquisitions succeeded (counts=%v)", len(got), counts)
+	}
+	for _, name := range []string{"acc1", "acc2", "acc3"} {
+		if counts[name] != 2 {
+			t.Errorf("%s took %d of 6 concurrent slots, want 2 (counts=%v)", name, counts[name], counts)
 		}
 	}
 }
