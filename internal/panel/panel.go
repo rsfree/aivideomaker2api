@@ -70,6 +70,12 @@ type Deps struct {
 	MediaEnabled  bool
 	Started       time.Time
 	ProbeInterval time.Duration
+	// MinterEndpoints 是 Turnstile 铸造 sidecar 的端点数（0 = 未接入）。
+	//
+	// 只报数量、**不探活**：面板不该为了展示去依赖另一个进程的可用性 ——
+	// 探测失败会让"面板打不开"与"minter 挂了"这两件事混在一起，排障时反而更慢。
+	// 真要看铸造细节（ready / warmed / pass_rate）用 `docker compose exec minter …--selfcheck`。
+	MinterEndpoints int
 	// OfficialEnabled / OfficialAccount 让面板只读地展示官方 REST 通路的状态。
 	// 🔴 刻意**不传 key 原文**：面板只显示"有没有配"和余额/模型，凭据永不出现在响应里。
 	OfficialEnabled bool
@@ -283,8 +289,12 @@ func (p *panel) handleOverview(w http.ResponseWriter) {
 		"tasks_charged":     p.deps.Store.CountCharged(),
 		"task_store":        p.deps.Store.Describe(),
 		"media_enabled":     p.deps.MediaEnabled,
-		"probe_interval":    p.deps.ProbeInterval.String(),
-		"now":               time.Now().Format(time.RFC3339),
+		"minter": map[string]any{
+			"configured": p.deps.MinterEndpoints > 0,
+			"endpoints":  p.deps.MinterEndpoints,
+		},
+		"probe_interval": p.deps.ProbeInterval.String(),
+		"now":            time.Now().Format(time.RFC3339),
 	})
 }
 

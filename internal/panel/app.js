@@ -86,6 +86,12 @@ function renderCards(overview) {
     ['提交槽位', String(overview.slots_in_use) + ' / ' + String(overview.slots_capacity), '占用 / 额度'],
     ['任务记录', String(overview.tasks), overview.task_store && overview.task_store.kind === 'jsonl' ? 'JSONL · 跨重启可读' : '内存 · 重启即丢'],
     ['成片出口', overview.media_enabled ? '已开启' : '透传上游', overview.media_enabled ? '对外给本服务地址' : '未配 public_base'],
+    // 铸造能力是"闸门翻起时还能不能跑"的唯一变量：没接上时服务照常 healthy，
+    // 只有撞上 Turnstile 才会表现为 429 —— 所以必须放在总览第一屏。
+    ['Turnstile 铸造', overview.minter && overview.minter.configured ? '已接入' : '未接入',
+      overview.minter && overview.minter.configured
+        ? String(overview.minter.endpoints) + ' 个端点 · 闸门翻起时自动铸 token'
+        : '闸门翻起只能等它衰减（对外表现为 429）'],
   ];
   const box = document.getElementById('cards');
   box.replaceChildren(...cards.map(([label, value, sub]) =>

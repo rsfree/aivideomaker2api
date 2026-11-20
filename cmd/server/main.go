@@ -170,6 +170,7 @@ func main() {
 			MediaEnabled:    proxy.Enabled(),
 			Started:         time.Now(),
 			ProbeInterval:   cfg.Pool.ProbeInterval.Get(),
+			MinterEndpoints: upstream.CountMinterEndpoints(cfg.Minter.URL),
 			OfficialEnabled: cfg.Official.Enabled(), OfficialAccount: officialAccount,
 			PlanRequest: server.PlanDebug,
 			// 调试历史落在任务库旁边（同一个 data 目录，一起备份）。

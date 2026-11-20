@@ -499,14 +499,19 @@ docker compose exec minter python3 -m minter.service --selfcheck
 ### 其他
 
 - 镜像：`ghcr.io/rsfree/aivideomaker2api`（linux/amd64 + arm64；tag 形如 `0.1.25` / `latest` / `sha-<短SHA>`）
-  + 同 tag 的 `ghcr.io/rsfree/minter-service`（仅 linux/amd64：Chrome 无官方 arm64 包）
+  + `ghcr.io/rsfree/minter-service`（仅 linux/amd64：Chrome 无官方 arm64 包）。
+  CI 每次发版都会推 minter 的同版本 tag，但 compose **不跟随** —— 引用的是钉死的那一个
 - 面板与 API 同端口；反代样例见 `deploy/nginx.aivideomaker2api.1task.cn.conf`
   （要点：`proxy_buffering off` 给成片流式下载，`proxy_read_timeout` 要大于闸门等待）
 - 端口挪动时**只需改 `AVM2_LISTEN` / `-listen`**：健康检查会从监听地址推导探测地址
 - `ulimits.nofile` 已放开到 65536。接待能力的真天花板是 fd，不是 worker 数 ——
   goroutine 阻塞等待槽位不占 OS 线程，所以**不需要加 worker/副本**来换接待能力
-- **回滚**：`AVM2_IMAGE_TAG=0.1.38 docker compose up -d --pull always`。
-  回到 0.1.39 之前（那些 tag 没有配套 minter 镜像）时再加 `AVM2_MINTER_TAG=0.1.0`
+- **回滚**：`AVM2_IMAGE_TAG=0.1.38 docker compose up -d --pull always` —— 只动业务镜像。
+  minter 的版本在 compose 里**独立钉死**（`minter.image` 的 `${AVM2_MINTER_TAG:-0.1.40}`），
+  回滚业务时它保持不动。这一点是刻意的：跟随业务版本会让"回滚到 0.1.39 之前"去拉一个
+  不存在的 minter tag（那些版本没有配套镜像），把一次回滚变成两次故障。
+- **minter 的 Chrome 版本**钉在 `deploy/minter/Dockerfile` 的 `CHROME_VERSION`
+  （浮动 latest 会让同一 tag 重建出不同内容；升级路径写在那个 ARG 的注释里）
 
 ## 目录结构
 

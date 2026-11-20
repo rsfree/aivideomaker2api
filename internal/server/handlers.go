@@ -21,6 +21,7 @@ import (
 	"github.com/rsfree/aivideomaker2api/internal/sniff"
 	"github.com/rsfree/aivideomaker2api/internal/store"
 	"github.com/rsfree/aivideomaker2api/internal/translate"
+	"github.com/rsfree/aivideomaker2api/internal/upstream"
 )
 
 const (
@@ -733,12 +734,7 @@ func countEnabled(views []pool.View) int {
 // URL 支持逗号分隔多实例，所以报"端点数量"而不是单个 bool —— 多实例时一个挂了
 // 仍有别的可用，计数是运维判断冗余度的最小信息。
 func minterDescribe(rawURL string) map[string]any {
-	endpoints := 0
-	for _, raw := range strings.Split(rawURL, ",") {
-		if strings.TrimSpace(raw) != "" {
-			endpoints++
-		}
-	}
+	endpoints := upstream.CountMinterEndpoints(rawURL)
 	return map[string]any{"configured": endpoints > 0, "endpoints": endpoints}
 }
 

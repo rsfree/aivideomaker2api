@@ -78,6 +78,20 @@ func NewMinter(cfg MinterConfig) *Minter {
 	}
 }
 
+// CountMinterEndpoints 数 URL 列表里非空的端点（逗号分隔多实例）。
+//
+// 抽在这里而不是各调用点自己 split：/healthz 与面板都要回答"接了几个端点"，
+// 两处各写一遍迟早会算出不同的数（一处算了空串、一处没算）。
+func CountMinterEndpoints(rawURL string) int {
+	n := 0
+	for _, raw := range strings.Split(rawURL, ",") {
+		if strings.TrimSpace(raw) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // Configured 表示接了铸造能力。
 func (m *Minter) Configured() bool { return m != nil && len(m.urls) > 0 }
 

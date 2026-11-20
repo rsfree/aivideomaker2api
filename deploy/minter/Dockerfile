@@ -60,6 +60,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #    `/var/lib/apt/lists/*`，后一层装 deb 就会因没有 apt 索引而报
 #    `google-chrome-stable : Depends: libvulkan1 but it is not installable`（exit 100）。
 ARG TARGETARCH
+# 🔴 Chrome 版本**钉死**，不用 `google-chrome-stable_current_amd64.deb`（那个是浮动 latest）：
+#    浮动版本会让同一个镜像 tag 在不同时间重建出不同内容（违反可复现），而且某天 Chrome
+#    新版若让 CF 判定异常，构建照样成功、铸造全败，回滚镜像也救不了（重建还是新的）。
+#    升级走这里：从
+#      https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages
+#    取 `Filename:` 里的版本号（形如 158.0.8127.36-1），改本行后重新发版。
+#    注意必须带 `-1` 修订号：不带的话 pool 里没有对应文件（404）。
+ARG CHROME_VERSION=158.0.8127.36-1
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Retries "6";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
         > /etc/apt/apt.conf.d/80minter-retries \
@@ -74,11 +82,16 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     && if [ "$TARGETARCH" = "arm64" ]; then \
         apt-get install -y --no-install-recommends chromium; \
     else \
-        curl -fsSL -o /tmp/chrome.deb \
-            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-        && apt-get install -y /tmp/chrome.deb \
+        url="https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb"; \
+        if ! curl -fsSL -o /tmp/chrome.deb "$url"; then \
+            echo "Chrome ${CHROME_VERSION} 下载失败：$url" >&2; \
+            echo "从 dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages 取 Filename 后更新 CHROME_VERSION" >&2; \
+            exit 1; \
+        fi; \
+        apt-get install -y /tmp/chrome.deb \
         && rm -f /tmp/chrome.deb; \
     fi \
+    && (google-chrome --version || chromium --version || true) \
     && rm -rf /var/lib/apt/lists/*
 #
 # 注：Google 不发布 Linux/arm64 的 Chrome ⇒ arm64 走 Debian 原生 chromium

@@ -7,8 +7,7 @@
 #
 # 🔴 部署只有一条命令（在部署目录，先 .env 写好 AVM2_API_KEY / AVM2_PANEL_PASSWORD / MINTER_KEY）：
 #     AVM2_IMAGE_TAG=<tag> docker compose up -d --pull always
-#   tag 同时决定两个镜像：CI 每次发版都会推同名 minter 镜像。要单独钉 minter 版本时
-#   设 AVM2_MINTER_TAG（回滚到 0.1.39 之前的业务版本时才需要）。
+#   minter 版本在文件里独立钉死（见下面 minter.image 的注释），回滚业务时不需要动它。
 #
 # 🔴 端口只绑回环：本机是边缘反代节点，绑 0.0.0.0 等于把"带真实账号凭据、能花积分"的
 #    生成出口裸到公网。公网入口一律 nginx + 域名。
@@ -63,9 +62,13 @@ services:
         max-file: "5"
 
   minter:
-    # 版本默认**跟随业务 tag**（CI 每次发版都推同名镜像）⇒ 部署只维护一个版本变量，
-    # 不会出现"业务 0.1.42 + minter 0.1.0"这种错配。
-    image: ghcr.io/rsfree/minter-service:${AVM2_MINTER_TAG:-${AVM2_IMAGE_TAG:-0.1.0}}
+    # 🔴 版本**独立钉死**，不跟随 AVM2_IMAGE_TAG：
+    #   · 回滚业务（AVM2_IMAGE_TAG=旧版）时 minter 保持不动 —— 这是最常见的回滚场景，
+    #     而"跟随"会让回滚去拉一个不存在的 minter tag（0.1.39 之前的版本没有配套镜像）。
+    #   · minter 是稳定组件（Chrome 版本已钉死在 Dockerfile 的 CHROME_VERSION），
+    #     没有"必须与业务同版本"的依赖关系。
+    # 升级 minter = 改这一行 + 发版（CI 每次都会推新 tag，可直接引用）。
+    image: ghcr.io/rsfree/minter-service:${AVM2_MINTER_TAG:-0.1.40}
     container_name: minter
     restart: unless-stopped
     environment:

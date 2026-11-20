@@ -422,6 +422,31 @@ func TestOverviewReportsTodayAndReadiness(t *testing.T) {
 			t.Errorf("overview missing %q", key)
 		}
 	}
+
+	// 铸造能力必须出现在总览里（键缺失会让"接没接"变成两步判断）。
+	minter, ok := out["minter"].(map[string]any)
+	if !ok {
+		t.Fatalf("overview must carry a `minter` block, got %v", out["minter"])
+	}
+	if minter["configured"] != false {
+		t.Errorf("minter.configured = %v, want false（测试未注入端点）", minter["configured"])
+	}
+}
+
+// 接上铸造能力时，总览必须能看出来 —— 这是"闸门翻起还能不能跑"的唯一变量。
+func TestOverviewReportsMinterEndpoints(t *testing.T) {
+	h, _ := newPanelWithDeps(t, "", func(d *Deps) { d.MinterEndpoints = 2 })
+	code, out := panelDo(t, h, http.MethodGet, "/panel/api/overview", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (%v)", code, out)
+	}
+	minter, ok := out["minter"].(map[string]any)
+	if !ok {
+		t.Fatalf("overview must carry a `minter` block, got %v", out["minter"])
+	}
+	if minter["configured"] != true || fmt.Sprint(minter["endpoints"]) != "2" {
+		t.Errorf("minter = %v, want configured=true endpoints=2", minter)
+	}
 }
 
 // 任务列表要能按状态/账号过滤，并带上内部归因（面板排障用）。

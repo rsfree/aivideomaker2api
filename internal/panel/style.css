@@ -90,7 +90,9 @@ code {
   display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px;
 }
 
-.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+/* 自适应列数：卡片从 4 张变 5 张时不需要改布局，也不会出现"第 5 张独占一行"。
+   minmax 下限取 190px —— 低于它「已接入 / 1 个端点」这类文案会被压到折行。 */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 14px 16px; box-shadow: var(--shadow);
