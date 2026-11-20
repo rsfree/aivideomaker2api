@@ -457,19 +457,56 @@ POST ──► 选号（优先空闲槽 → 负载率低 → 余额多）──�
 
 ## 部署
 
+**一套 compose 起两个容器**：业务 + Turnstile 铸造（`minter` sidecar）。准备 `.env` 之后只有一条命令。
+
 ```bash
+cp .env.example .env && chmod 600 .env
+# 必填三项：AVM2_API_KEY / AVM2_PANEL_PASSWORD / MINTER_KEY（openssl rand -hex 24）
 cp config.example.json config.json
-# 填 public_base（如 https://avm2api.1task.cn）才会启用成片出口
-docker compose up -d
+
+AVM2_IMAGE_TAG=<tag> docker compose up -d --pull always
 docker compose logs -f
 ```
 
+### 为什么 minter 内置
+
+它只服务本业务的过闸（aivideomaker.ai）。独立部署踩过三类重复故障：镜像要手工搬、
+网络要手工接、两处 key 要人工同步。现在：
+
+- **地址写死**：业务用 compose 服务名 `http://minter:8899` 访问，不存在"配错地址"这个可能；
+  minter 不发布任何宿主端口（它能产出过闸凭证，只让同网络容器访问）
+- **key 只有一个**：`MINTER_KEY` 同时喂给 minter 与业务，两边不可能不同步
+- **版本只有一个**：`AVM2_IMAGE_TAG` 同时决定两个镜像 —— CI 每次发版都推同 tag 的
+  `ghcr.io/rsfree/minter-service`，不存在"业务 0.1.42 + minter 0.1.0"这种错配
+
+### 首次部署唯一要注意的：minter 的时区
+
+`AVM2_MINTER_TZ` 必须与**部署机出口 IP 的地理**一致（默认 `Asia/Tokyo`，对应 node-3）。
+时区不一致时 Cloudflare 会把挑战升级为交互式，铸造恒失败 —— 而服务照常 `ready`，
+这是本项目最难查的一类故障。部署到别的地区时同时改 `AVM2_MINTER_TZ` 与 `AVM2_MINTER_EGRESS`。
+
+### 每次部署后的验收
+
+```bash
+docker compose ps                                  # 两个容器都 Up (healthy)
+docker compose images                              # 两个镜像 tag 都等于本次版本
+curl -s 127.0.0.1:39055/healthz | jq '.minter'     # 必须是 {"configured":true,"endpoints":1}
+docker compose exec minter python3 -m minter.service --selfcheck
+```
+
+`healthz.minter.configured=false` = 业务没接上铸造能力，此时闸门翻起只能等它衰减（表现为 429）。
+
+### 其他
+
 - 镜像：`ghcr.io/rsfree/aivideomaker2api`（linux/amd64 + arm64；tag 形如 `0.1.25` / `latest` / `sha-<短SHA>`）
+  + 同 tag 的 `ghcr.io/rsfree/minter-service`（仅 linux/amd64：Chrome 无官方 arm64 包）
 - 面板与 API 同端口；反代样例见 `deploy/nginx.aivideomaker2api.1task.cn.conf`
   （要点：`proxy_buffering off` 给成片流式下载，`proxy_read_timeout` 要大于闸门等待）
 - 端口挪动时**只需改 `AVM2_LISTEN` / `-listen`**：健康检查会从监听地址推导探测地址
 - `ulimits.nofile` 已放开到 65536。接待能力的真天花板是 fd，不是 worker 数 ——
   goroutine 阻塞等待槽位不占 OS 线程，所以**不需要加 worker/副本**来换接待能力
+- **回滚**：`AVM2_IMAGE_TAG=0.1.38 docker compose up -d --pull always`。
+  回到 0.1.39 之前（那些 tag 没有配套 minter 镜像）时再加 `AVM2_MINTER_TAG=0.1.0`
 
 ## 目录结构
 
@@ -495,7 +532,10 @@ aivideomaker2api/
 │   └── panel/             内置控制台（go:embed + 严格 CSP）
 ├── config.example.json
 ├── Dockerfile / docker-compose.yml / Makefile
-├── deploy/                nginx 反代样例
+├── deploy/
+│   ├── nginx.aivideomaker2api.1task.cn.conf   反代样例
+│   └── minter/           Turnstile 铸造 sidecar（vendored 自 ~/WorkBuddy/minter）
+│                         # 源码 + 内置 targets.yaml；由 release 流水线构建同名 tag 镜像
 └── docs/web-reverse.md    上游接口事实（tRPC 形状、procedure、上传、状态词表）
 ```
 

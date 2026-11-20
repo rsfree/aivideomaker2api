@@ -22,5 +22,9 @@ jobs:
           fi
 
       - run: go vet ./...
+      # vendored 的 minter 源码至少要能编译：它不在 Go 的检查范围内，坏了只有构建镜像
+      # 时才会炸（而那已经是发版后段，代价高）。
+      - name: minter 源码语法检查
+        run: python3 -m compileall -q deploy/minter/minter
       - run: go build ./...
       - run: go test ./... -count=1

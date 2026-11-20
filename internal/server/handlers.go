@@ -495,6 +495,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"slots_in_use":     inUse,
 		"slots_capacity":   capacity,
 		"media_proxy":      mediaDescribe(s.media),
+		// Turnstile 铸造能力是否接上。**只给布尔与端点数量**：/healthz 不鉴权，
+		// minter 地址是内网拓扑，不该出现在这里。
+		//
+		// 为什么要暴露：这是部署验收里最容易静默失败的一项 —— 没接上时服务照常
+		// healthy、面板照常出数，只有闸门翻起的那一刻才会表现为 429。没有这个字段，
+		// 判断"接没接"只能翻启动日志。
+		"minter": minterDescribe(s.cfg.MinterURL),
 	}
 	writeJSON(w, http.StatusOK, info)
 }
@@ -719,6 +726,20 @@ func countEnabled(views []pool.View) int {
 		}
 	}
 	return n
+}
+
+// minterDescribe 描述 Turnstile 铸造能力（**不含地址**）。
+//
+// URL 支持逗号分隔多实例，所以报"端点数量"而不是单个 bool —— 多实例时一个挂了
+// 仍有别的可用，计数是运维判断冗余度的最小信息。
+func minterDescribe(rawURL string) map[string]any {
+	endpoints := 0
+	for _, raw := range strings.Split(rawURL, ",") {
+		if strings.TrimSpace(raw) != "" {
+			endpoints++
+		}
+	}
+	return map[string]any{"configured": endpoints > 0, "endpoints": endpoints}
 }
 
 func mediaDescribe(proxy *media.Proxy) map[string]any {

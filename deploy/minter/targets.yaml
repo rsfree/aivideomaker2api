@@ -1,0 +1,19 @@
+# minter 目标注册表 —— 随镜像内置（compose 不挂载）。
+#
+# 为什么内置而不是挂载：compose 挂载单个文件时宿主文件必须已存在，缺文件会被
+# Docker 建成**目录**，容器起来读到的是目录 ⇒ 注册表加载失败。本项目的 minter
+# 只有 aivideomaker 一个目标，内置就消除了这类部署事故。
+# 需要临时改目标时再挂载覆盖（见 docker-compose.yml 的注释）。
+#
+# 白名单语义：服务只认这里注册过的名字，请求**永不接受 URL**；改完保存即热重载。
+targets:
+  - name: aivideomaker
+    sitekey: "0x4AAAAAABrddy3Hsje8mwB_"
+    light_url: "https://aivideomaker.ai/robots.txt"
+    origin: "https://aivideomaker.ai"
+    # prewarm 刻意不开：机房出口 + 低频目标，空载持续空铸只会抬高站点侧风控分。
+    # 真正需要常备池时改 true（或加 pool_target: N），2 秒热重载生效。
+    prewarm: false
+    note: >
+      aivideomaker.ai web 线（本项目的 Turnstile 过闸）。
+      sitekey 来源：站点 chunk 挖出（2026-09-14），与生产实例一致。

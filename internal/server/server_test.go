@@ -990,3 +990,39 @@ func TestRateLimitedTaskCarriesRetryAfter(t *testing.T) {
 		t.Error("a rate-limited task must answer with Retry-After (seconds), got none")
 	}
 }
+
+// TestHealthzReportsMinterWithoutLeakingAddress 钉住部署验收的判据。
+//
+// 没接上铸造能力时，服务照常 healthy、面板照常出数，只有闸门翻起的那一刻才表现为
+// 429 —— 这是部署里最容易静默失败的一项，必须能从 /healthz 一眼看出来；
+// 同时 /healthz 不鉴权，minter 地址属内网拓扑，不能出现。
+func TestHealthzReportsMinterWithoutLeakingAddress(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.MinterURL = "http://minter:8899,http://10.0.0.9:8899"
+	}, "")
+	code, health := h.do(t, http.MethodGet, "/healthz", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("healthz = %d", code)
+	}
+	minter, _ := health["minter"].(map[string]any)
+	if minter["configured"] != true || minter["endpoints"] != float64(2) {
+		t.Fatalf("minter = %v, want configured=true endpoints=2", health["minter"])
+	}
+	blob, _ := json.Marshal(health)
+	if strings.Contains(string(blob), "10.0.0.9") {
+		t.Error("/healthz must not leak the minter address (it is unauthenticated)")
+	}
+}
+
+// 未配置时也必须有明确的 false：键缺失会让"接没接"从一步判断变成两步。
+func TestHealthzMinterConfiguredFalseByDefault(t *testing.T) {
+	h := newHarness(t, nil, "")
+	_, health := h.do(t, http.MethodGet, "/healthz", "", nil)
+	minter, ok := health["minter"].(map[string]any)
+	if !ok {
+		t.Fatalf("healthz must always carry a minter object, got %v", health["minter"])
+	}
+	if minter["configured"] != false || minter["endpoints"] != float64(0) {
+		t.Errorf("minter = %v, want configured=false endpoints=0", minter)
+	}
+}

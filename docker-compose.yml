@@ -1,29 +1,52 @@
+# aivideomaker2api · 一套 compose：业务 + Turnstile 铸造（minter sidecar）
+#
+# 为什么把 minter 收进来：它只服务本业务（aivideomaker.ai 的过闸）。独立部署带来过
+# 三类反复出现的故障：镜像要手工搬、端口/网络要手工接、两处 key 要人工同步。
+# 现在两个容器在同一个 compose 网络里，业务用服务名访问 —— **路径写死，没有"配错地址"
+# 这个可能**；key 也只存在于一个 .env 变量里，两边不可能不同步。
+#
+# 🔴 部署只有一条命令（在部署目录，先 .env 写好 AVM2_API_KEY / AVM2_PANEL_PASSWORD / MINTER_KEY）：
+#     AVM2_IMAGE_TAG=<tag> docker compose up -d --pull always
+#   tag 同时决定两个镜像：CI 每次发版都会推同名 minter 镜像。要单独钉 minter 版本时
+#   设 AVM2_MINTER_TAG（回滚到 0.1.39 之前的业务版本时才需要）。
+#
+# 🔴 端口只绑回环：本机是边缘反代节点，绑 0.0.0.0 等于把"带真实账号凭据、能花积分"的
+#    生成出口裸到公网。公网入口一律 nginx + 域名。
+name: aivideomaker2api
+
 services:
-  avm2api:
-    image: ${AVM2API_IMAGE:-ghcr.io/rsfree/aivideomaker2api:latest}
-    container_name: avm2api
+  aivideomaker2api:
+    image: ghcr.io/rsfree/aivideomaker2api:${AVM2_IMAGE_TAG:-latest}
+    container_name: aivideomaker2api
     restart: unless-stopped
+    depends_on:
+      # 只要求"已启动"，不等 healthy：minter 冷启动要一两分钟，而业务侧本来就有
+      # 完整的降级路径（铸造失败 ⇒ 闸门问题如实 429，不会因此起不来）。
+      minter:
+        condition: service_started
     ports:
-      - "${AVM2_HOST_PORT:-8808}:8808"
+      - "127.0.0.1:${AVM2_HOST_PORT:-39055}:8808"
     volumes:
-      # 配置（含公开参数）只读挂载；凭据与数据走可写卷。
+      # 🔴 挂载单个文件时宿主文件必须**已存在**，否则 Docker 会把它建成目录 → 启动失败。
       - ./config.json:/app/config.json:ro
-      - ./auths:/app/auths
-      - ./data:/app/data
+      - ./auths:/app/auths          # 账号（每号一个 json，0600）
+      - ./data:/app/data            # 任务 JSONL + 账号状态
     environment:
-      # 敏感项走环境变量，不进配置文件、不进镜像。
-      - AVM2_API_KEY=${AVM2_API_KEY:-}
-      - AVM2_PANEL_PASSWORD=${AVM2_PANEL_PASSWORD:-}
-      # 对外可访问的本服务地址；填了才会把成片直链换成本服务地址。
-      - AVM2_PUBLIC_BASE=${AVM2_PUBLIC_BASE:-}
-      # 成片直链：1 = 对外直接给上游地址（不替上游扛下载带宽），/v/ 端点仍保留。
-      - AVM2_MEDIA_PASSTHROUGH=${AVM2_MEDIA_PASSTHROUGH:-0}
-      # Turnstile 铸造服务。走 host 网络部署时用 host.docker.internal（compose 会自动加
-      # host-gateway 映射）；留空 = 不启用，闸门翻起时如实 429。
-      - AVM_MINTER_URL=${AVM_MINTER_URL:-}
-      - AVM_MINTER_KEY=${AVM_MINTER_KEY:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      TZ: Asia/Shanghai
+      # 敏感值走环境变量覆盖，config.json 里留空（口径见仓库 README）。
+      AVM2_API_KEY: ${AVM2_API_KEY:?set in .env}
+      AVM2_PANEL_PASSWORD: ${AVM2_PANEL_PASSWORD:?set in .env}
+      AVM2_MEDIA_PASSTHROUGH: ${AVM2_MEDIA_PASSTHROUGH:-0}
+      # 对外可访问的本服务地址：填了才会把成片直链换成本服务地址（passthrough 下无用）。
+      AVM2_PUBLIC_BASE: ${AVM2_PUBLIC_BASE:-}
+      # 官方 REST API（/api/v1/*）的 key：留空则只跑网页会话。
+      AVM_OFFICIAL_API_KEY: ${AVM_OFFICIAL_API_KEY:-}
+      # Turnstile 铸造：**地址写死**指向本 compose 的 minter 服务（服务名解析由
+      # compose 网络提供）。不要改成 host.docker.internal —— 容器访问宿主回环不是
+      # 127.0.0.1，那条路会让"服务看着正常、铸造永远失败"。
+      AVM_MINTER_URL: http://minter:8899
+      AVM_MINTER_KEY: ${MINTER_KEY:?set in .env}
+    user: "10001:10001"
     # 接待能力的真天花板是 fd，不是 worker 数：容器默认 ulimit -n=1024，
     # 放开后单进程实测能稳定承接数千并发（goroutine 阻塞等待槽位不占 OS 线程）。
     ulimits:
@@ -31,8 +54,50 @@ services:
         soft: 65536
         hard: 65536
     stop_grace_period: 30s
+    # 日志封顶：根分区仅 29G（历史上有过单个日志涨到 11G 打满磁盘的事故），
+    # 不能吃 json-file 默认的无限增长。
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
+
+  minter:
+    # 版本默认**跟随业务 tag**（CI 每次发版都推同名镜像）⇒ 部署只维护一个版本变量，
+    # 不会出现"业务 0.1.42 + minter 0.1.0"这种错配。
+    image: ghcr.io/rsfree/minter-service:${AVM2_MINTER_TAG:-${AVM2_IMAGE_TAG:-0.1.0}}
+    container_name: minter
+    restart: unless-stopped
+    environment:
+      # 🔴 TZ 必须与**出口 IP 的地理**一致，不是可选的美化项：UTC/时区不一致时
+      #    Cloudflare 会判"时区/会话不一致"并下发交互式挑战 ⇒ 铸造恒失败
+      #    （现象：服务照常 ready、铸造永远不成功）。
+      TZ: ${AVM2_MINTER_TZ:-Asia/Tokyo}
+      PORT: "8899"
+      BIND_HOST: 0.0.0.0
+      # fail-closed：非回环绑定 + 没有 key ⇒ 服务拒绝启动。与业务侧共用同一个变量。
+      MINTER_KEY: ${MINTER_KEY:?set in .env}
+      TARGETS_FILE: /app/targets.yaml
+      CDP_PORT: "9333"
+      MINT_MAX_INFLIGHT: "3"
+      MINT_REUSE_WIDGET: "1"
+      MINTER_INSTANCE_ID: aivideomaker2api
+      MINTER_EGRESS: ${AVM2_MINTER_EGRESS:-dc-tokyo}
+    volumes:
+      # Chrome profile 落在命名卷里：重启后不用重新冷启动（不解决风控，只省时间）。
+      - minter-profile:/data
+      # 注册表**默认用镜像内置的那份**（只含 aivideomaker 单目标）。要临时改目标时才
+      # 打开下面这行 —— 且宿主文件必须**先存在**，否则会被 Docker 建成目录。
+      # - ./minter-targets.yaml:/app/targets.yaml:ro
+    # 🔴 不发布任何宿主端口：本服务能产出"过 Turnstile 的凭证"，只让同 compose 网络的
+    #    业务容器访问。排障请用：
+    #      docker compose exec minter python3 -m minter.service --selfcheck
+    #      docker compose logs --tail 50 minter
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  minter-profile:

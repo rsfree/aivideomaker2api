@@ -64,6 +64,10 @@ type Config struct {
 	// seedance20 / wan30 / happyhorse 这些网页端没有的模型 —— 有 key 就优先走它；
 	// 没有 key 就退回网页会话（480p 免费档）。
 	Official OfficialConfig
+	// MinterURL 是 Turnstile 铸造服务地址（逗号分隔多实例）。**只用于 /healthz
+	// 判断"接没接"**，不参与控制流；真正的客户端在 upstream.Client 上。
+	// 存地址而不是 bool：多实例部署时端点数量是运维判断冗余度的最小信息。
+	MinterURL string
 	// History 是调试/提交账本（可空）。
 	History *debughist.Recorder
 	// PanelHandler 挂在 /panel 下（nil = 不启用面板）。

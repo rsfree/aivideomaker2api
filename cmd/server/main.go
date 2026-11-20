@@ -197,6 +197,7 @@ func main() {
 		RehostWorkers:     cfg.Upstream.RehostWorkers,
 		PanelHandler:      panelHandler,
 		History:           history,
+		MinterURL:         cfg.Minter.URL,
 		Official: server.OfficialConfig{
 			APIKey:  cfg.Official.APIKey,
 			BaseURL: cfg.Official.BaseURL,
