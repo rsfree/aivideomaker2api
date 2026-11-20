@@ -46,7 +46,7 @@ func TestServeRewritesLeakyHeaders(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p := New("https://avm2api.example", "/v", 5*time.Second)
+	p := New("https://avm2api.example", "/v", 5*time.Second, false)
 	if !p.Enabled() {
 		t.Fatal("proxy must be enabled when public_base is set")
 	}
@@ -76,7 +76,7 @@ func TestServeRewritesLeakyHeaders(t *testing.T) {
 }
 
 func TestDownloadURLIsOurs(t *testing.T) {
-	p := New("https://avm2api.example/", "v", time.Second)
+	p := New("https://avm2api.example/", "v", time.Second, false)
 	got := p.DownloadURL("cgt-1", "https://static2.img2video.ai/x_0_minimax_h3.mov")
 	if want := "https://avm2api.example/v/cgt-1.mov"; got != want {
 		t.Errorf("DownloadURL = %q, want %q", got, want)
@@ -84,7 +84,7 @@ func TestDownloadURLIsOurs(t *testing.T) {
 }
 
 func TestDisabledProxyKeepsUpstreamLinks(t *testing.T) {
-	p := New("", "/v", time.Second)
+	p := New("", "/v", time.Second, false)
 	if p.Enabled() {
 		t.Fatal("empty public_base must disable the proxy (byte-for-byte old behavior)")
 	}
