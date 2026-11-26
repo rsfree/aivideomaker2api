@@ -47,7 +47,7 @@ func (s *Server) handleCreateArk(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	plan, err := translate.Create(body, options, "")
+	plan, err := translate.Create(body, options, "", s.cfg.FreeOnly)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -75,6 +75,7 @@ func (s *Server) handleCreateArk(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, fmt.Errorf("persist task: %w", err))
 		return
 	}
+	s.noteFreeOnlyAdjusted(plan, entry.ID)
 	if s.cfg.SubmitInline {
 		s.submit(entry, plan)
 	} else {
@@ -100,7 +101,7 @@ func (s *Server) handleCreateOpenAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 面级策略：本端点**只跑免费线**。槽位恒为 FreeOnlySlot，调用方写什么模型名都不参与选路。
-	plan, err := translate.Create(arkBody, nil, openaivideos.FreeOnlySlot)
+	plan, err := translate.Create(arkBody, nil, openaivideos.FreeOnlySlot, s.cfg.FreeOnly)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -123,6 +124,7 @@ func (s *Server) handleCreateOpenAI(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, fmt.Errorf("persist task: %w", err))
 		return
 	}
+	s.noteFreeOnlyAdjusted(plan, entry.ID)
 	if s.cfg.SubmitInline {
 		s.submit(entry, plan)
 	} else {
@@ -148,6 +150,71 @@ func (s *Server) newEntry(plan *translate.Plan, shape string, effective map[stri
 		Status:      "queued",
 		CreatedAtMs: time.Now().UnixMilli(),
 	}
+}
+
+// noteFreeLineBilled 在"免费窗口内的请求却被上游扣费"时打标记（计费红线探针）。
+//
+// 判据是两条事实的交集：
+//   - effective.billed=false —— 这条请求在我们这边**应当**免费（分辨率/时长枚举都在窗口内）；
+//   - usage.paid=true        —— 上游**实际**收了积分。
+//
+// 两者同时成立只有两种解释：该账号/该设备的当日免费额度已用尽、站点从"429
+// MINIMAX_H3_FREE_DAILY_LIMIT"改成"静默扣费"；或者站点整体收窄了免费窗口。
+// 这两种情况我们都**收不到任何前置信号** —— 只有终态 `paid` 能暴露，所以必须落成
+// 一条可检索的日志（marker=free_line_billed）+ 一个计数器（aivm_free_line_billed_total）。
+//
+// 反向情况（effective.billed=true 且 paid=true）是意料之中的扣费，不在这里刷日志 ——
+// 那属于"调用方选了付费档"，不是异动。
+func (s *Server) noteFreeLineBilled(entry *store.Entry, view map[string]any) {
+	// 只在**首次**进入终态时记一次：entry 是 Patch 之前的快照，已经是终态说明
+	// 这是一次重启后的重放（缓存没了、状态早就定过），重复记等于让计数器说谎。
+	if terminalStatus[entry.Status] {
+		return
+	}
+	usage := jsonx.Map(view["usage"])
+	if usage == nil {
+		return
+	}
+	if paid, _ := usage["paid"].(bool); !paid {
+		return
+	}
+	if predicted, ok := entry.Effective["billed"].(bool); ok && predicted {
+		return
+	}
+	s.freeLineBilled.Add(1)
+	tier := ""
+	if entry.WebParams != nil {
+		tier = jsonx.String(entry.WebParams["tier"])
+	}
+	s.log.Warn("free-window request was billed by upstream — free quota exhausted on this account/device, "+
+		"or the site narrowed its free window",
+		"marker", "free_line_billed",
+		"task", entry.ID,
+		"account", entry.Account,
+		"upstream_task", entry.TaskID,
+		"model", entry.Model,
+		"resolution", entry.Effective["resolution"],
+		"duration", entry.Effective["duration"],
+		"tier", tier,
+		"usage", usage,
+	)
+}
+
+// noteFreeOnlyAdjusted 把 free-only 策略改写过的参数写进服务日志。
+//
+// 为什么单独一条日志而不是只写 warnings：warnings 落在任务账本里、面板只显示条数，
+// 而"谁还在往这条只有免费档的线上发 1080p/base/official"是**调用方行为**问题 ——
+// 只能靠日志聚合才看得出来。marker 固定，方便 `grep marker=free_only_adjusted`。
+func (s *Server) noteFreeOnlyAdjusted(plan *translate.Plan, taskID string) {
+	if len(plan.FreeOnlyAdjusted) == 0 {
+		return
+	}
+	s.log.Info("free-only policy: snapped request into the free tier",
+		"marker", "free_only_adjusted",
+		"task", taskID,
+		"model", jsonx.String(plan.Requested["model"]),
+		"adjusted", plan.FreeOnlyAdjusted,
+	)
 }
 
 // ------------------------------------------------------------------- get --
@@ -283,6 +350,7 @@ func (s *Server) taskView(ctx context.Context, entry *store.Entry) (map[string]a
 					e.Usage = usage
 				}
 			})
+			s.noteFreeLineBilled(entry, view)
 			// 🔴 失败也可能是**花过钱**的：实测 720p/11s 因内容审核失败，但上游照样扣了 33 积分。
 			// 这条日志是运维唯一能主动看到"钱白花了"的地方 —— 面板上那句话太安静了。
 			if status == "failed" {
@@ -482,22 +550,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"service":    s.cfg.ServiceName,
 		"version":    s.cfg.Version,
 		"upstream":   "web",
-		"billing":    translate.BillingNote(),
+		"billing":    billingNote(s.cfg.FreeOnly),
 		"auth":       authMode(s.cfg.APIKey),
 		"uptime_sec": int(time.Since(s.started).Seconds()),
 		// 号池规模：**只给数量，不列明细** —— /healthz 不鉴权，明细就是别人的账号
 		// （余额与指纹）。明细走面板。
 		"accounts_tracked": len(snapshot),
 		"accounts_enabled": countEnabled(snapshot),
-		// 官方通路是否启用（只给布尔；key 不出现）。
-		"official_enabled": s.official != nil,
-		"tasks_tracked":    s.store.Count(""),
-		"task_store":       s.store.Describe(),
-		"task_cache_ttl":   s.cfg.TaskCacheTTL.Seconds(),
-		"submit_workers":   s.cfg.SubmitWorkers,
-		"slots_in_use":     inUse,
-		"slots_capacity":   capacity,
-		"media_proxy":      mediaDescribe(s.media),
+		// 官方通路的**创建能力**是否可用（只给布尔；key 不出现）。
+		// free-only 下恒为 false：查询历史任务仍走官方，但创建已被拒（见 forceChannel）。
+		"official_enabled": s.official != nil && !s.cfg.FreeOnly,
+		// free-only 是本进程的**计费策略**，必须能在 /healthz 一眼看到 ——
+		// 它决定了"这条线到底会不会花钱"，比 official_enabled 更接近红线。
+		"free_only":      s.cfg.FreeOnly,
+		"tasks_tracked":  s.store.Count(""),
+		"task_store":     s.store.Describe(),
+		"task_cache_ttl": s.cfg.TaskCacheTTL.Seconds(),
+		"submit_workers": s.cfg.SubmitWorkers,
+		"slots_in_use":   inUse,
+		"slots_capacity": capacity,
+		"media_proxy":    mediaDescribe(s.media),
 		// Turnstile 铸造能力是否接上。**只给布尔与端点数量**：/healthz 不鉴权，
 		// minter 地址是内网拓扑，不该出现在这里。
 		//
@@ -536,9 +608,28 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "aivm_upstream_task_gets_total %d\n", s.upstreamGets.Load())
 	b.WriteString("# HELP aivm_tasks_charged Tasks confirmed billed by the upstream (usage.paid=true).\n# TYPE aivm_tasks_charged gauge\n")
 	fmt.Fprintf(&b, "aivm_tasks_charged %d\n", s.store.CountCharged())
+	// 免费档口径失效的唯一早期信号：请求明明在免费窗口内，上游却扣了钱。
+	// 非零 ⇒ 该查号池的免费额度，或站点改了口径（见 noteFreeLineBilled）。
+	b.WriteString("# HELP aivm_free_line_billed_total Tasks predicted free but billed by upstream.\n# TYPE aivm_free_line_billed_total counter\n")
+	fmt.Fprintf(&b, "aivm_free_line_billed_total %d\n", s.freeLineBilled.Load())
 	b.WriteString("# HELP aivm_uptime_seconds Process uptime.\n# TYPE aivm_uptime_seconds counter\n")
 	fmt.Fprintf(&b, "aivm_uptime_seconds %d\n", int(time.Since(s.started).Seconds()))
 	_, _ = w.Write([]byte(b.String()))
+}
+
+// billingNote 是 /healthz 里"这条线怎么计费"的那句话。
+//
+// 两种策略的语义完全不同（一个是"越界就 400"，一个是"越界就降级"），
+// 共用一份文案会让排障的人按旧口径推断行为 —— 这正是计费类事故的常见起点。
+func billingNote(freeOnly bool) string {
+	if freeOnly {
+		return "free-only deployment: every request is snapped into the four free combos " +
+			"(480p@5s, 480p@10s, 720p@5s, 720p@8s) BEFORE translation — official channel, tier=base, " +
+			"1080p and out-of-enum durations are rewritten, durations snap UP (6s→8s). The request still " +
+			"succeeds. Official-only models and POST /official/* are refused; a task predicted free but " +
+			"billed upstream logs marker=free_line_billed."
+	}
+	return translate.BillingNote()
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -866,8 +957,8 @@ func firstNonNilValue(vals ...any) any {
 //
 // 复用与公网创建接口完全相同的 translate.Create / BillingView，
 // 所以"调试页看到的"和"真正提交时会发生的"是同一套判断 —— 不会出现两套口径。
-func PlanDebug(body map[string]any) (map[string]any, error) {
-	plan, err := translate.Create(body, nil, "")
+func (s *Server) PlanDebug(body map[string]any) (map[string]any, error) {
+	plan, err := translate.Create(body, nil, "", s.cfg.FreeOnly)
 	if err != nil {
 		return nil, err
 	}

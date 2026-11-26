@@ -80,6 +80,16 @@ type Config struct {
 	// 只是新任务不再让本服务替上游扛下载带宽。
 	MediaPassthrough bool `json:"media_passthrough"`
 
+	// FreeOnly 是本服务的**计费策略**：只提供不扣费的模型。
+	//
+	// true（默认）：翻译前把一切能花钱的参数丢掉（official 通道 / base 质量档 /
+	// 1080p / 免费枚举外的时长与帧数），官方独有模型与 /official/ 的创建路由直接 400。
+	// false：恢复"网页 + 官方"双通路 —— 调用方点名 official 时会**真的扣积分**。
+	//
+	// 默认 true 是刻意的：这个开关只有两种状态，其中一种会让别人花钱。
+	// 要花必须显式关掉（AVM2_FREE_ONLY=0），而不是靠"忘了配"。
+	FreeOnly bool `json:"free_only"`
+
 	AuthDir   string `json:"auth_dir"`
 	StateFile string `json:"state_file"`
 
@@ -207,6 +217,8 @@ func Default() Config {
 		Listen:    ":8808",
 		BaseURL:   "https://aivideomaker.ai",
 		MediaPath: "/v",
+		// 只提供免费档：这是"不出意外账单"的唯一默认值。
+		FreeOnly:  true,
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 		TaskStore: TaskStoreConfig{Path: "./data/tasks.jsonl", RetentionDays: 7, CacheTTL: Duration(15 * time.Second)},
@@ -282,6 +294,7 @@ func applyEnv(cfg *Config) {
 	setStr(&cfg.BaseURL, "AVM2_BASE_URL")
 	setStr(&cfg.PublicBase, "AVM2_PUBLIC_BASE")
 	setBool(&cfg.MediaPassthrough, "AVM2_MEDIA_PASSTHROUGH")
+	setBool(&cfg.FreeOnly, "AVM2_FREE_ONLY")
 	setStr(&cfg.AuthDir, "AVM2_AUTH_DIR")
 	setStr(&cfg.StateFile, "AVM2_STATE_FILE")
 	setStr(&cfg.TaskStore.Path, "AVM2_TASK_STORE")

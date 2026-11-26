@@ -58,6 +58,16 @@ func (s *Server) submit(entry *store.Entry, plan *translate.Plan) {
 	// 要官方通路必须**显式**：`extra_body.aivideomaker_channel="official"`。
 	// 路由：**默认网页**（它才有免费档）；官方只在调用方显式点名时使用。
 	// 哪些模型该走哪条路，由 `GET /v1/models` 列出来，调用时自己选。
+	//
+	// 🔴 这里是 free-only 的**最后一道闸**：翻译层已经把付费开关抹掉了，但账本里的
+	// 在途任务（升级前落盘的 official WebParams）仍会走到这条分支 —— 重试、重启补推
+	// 都会重新经过 submit。只靠 Create 拦截会留下一个"老任务继续花钱"的窗口。
+	if s.cfg.FreeOnly && strings.EqualFold(jsonx.String(plan.WebParams["channel"]), "official") {
+		s.markFailed(entry.ID, apierr.Param(
+			"free-only deployment: the official REST line is disabled (this task predates the policy "+
+				"change and was not submitted)", ""))
+		return
+	}
 	if strings.EqualFold(jsonx.String(plan.WebParams["channel"]), "official") {
 		if s.official == nil {
 			// 明确报错，别默默退回网页 —— 有些模型网页端根本没有，退回去只会换一个更难懂的错。

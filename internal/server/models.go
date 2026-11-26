@@ -147,16 +147,25 @@ func init() {
 
 // modelEntryView 把内部结构翻成对外 JSON：OpenAI 那几个字段必须有，
 // 我们的附加信息放 `aivideomaker` 下面，避免污染标准字段。
-func modelEntryView(m modelInfo) map[string]any {
+func modelEntryView(m modelInfo, freeOnly bool) map[string]any {
 	out := map[string]any{
 		"id":       m.ID,
 		"object":   "model",
 		"owned_by": "aivideomaker",
 	}
+	channel, officialReady := m.Channel, m.OfficialReady
+	if freeOnly {
+		// free-only 下官方通道**不能创建**：还写 `channel: both` / `official_ready: true`
+		// 等于告诉调用方"这条能走官方"，而实际会 400 —— 模型清单必须如实。
+		officialReady = false
+		if channel == "both" {
+			channel = "web"
+		}
+	}
 	extra := map[string]any{
-		"channel":        m.Channel,
+		"channel":        channel,
 		"web_ready":      m.WebReady,
-		"official_ready": m.OfficialReady,
+		"official_ready": officialReady,
 		"free":           m.Free,
 		"note":           m.Note,
 	}
@@ -183,7 +192,12 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]map[string]any, 0, len(modelCatalog))
 	for _, m := range modelCatalog {
-		data = append(data, modelEntryView(m))
+		// free-only：只列**有免费窗口**的模型。列出官方独有模型等于暗示"这里能跑"，
+		// 而调用方拿到的是 400 —— 把不可用的东西藏起来比让它失败更诚实。
+		if s.cfg.FreeOnly && !m.Free {
+			continue
+		}
+		data = append(data, modelEntryView(m, s.cfg.FreeOnly))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -196,17 +210,28 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	for _, m := range modelCatalog {
 		if strings.EqualFold(m.ID, id) {
-			writeJSON(w, http.StatusOK, modelEntryView(m))
+			if s.cfg.FreeOnly && !m.Free {
+				// 与列表口径一致：不提供的模型不在这里"单独漏出来"，
+				// 而且要说清原因 —— 报文里点名的模型不存在，比一句 unknown 更好排障。
+				s.writeError(w, r, apierr.Param(fmt.Sprintf(
+					"free-only deployment: model %q has no free window, so this service does not offer it", m.ID), "model"))
+				return
+			}
+			writeJSON(w, http.StatusOK, modelEntryView(m, s.cfg.FreeOnly))
 			return
 		}
 	}
-	s.writeError(w, r, errUnknownModel(id))
+	s.writeError(w, r, errUnknownModel(id, s.cfg.FreeOnly))
 }
 
 // errUnknownModel 列出**可用**的模型，别让调用方猜。
-func errUnknownModel(id string) error {
+// free-only 下列的必须是同一份清单 —— 否则报文会"推荐"一个列表里查不到的模型。
+func errUnknownModel(id string, freeOnly bool) error {
 	ids := make([]string, 0, len(modelCatalog))
 	for _, m := range modelCatalog {
+		if freeOnly && !m.Free {
+			continue
+		}
 		ids = append(ids, m.ID)
 	}
 	return apierr.Param("unknown model \""+id+"\"; available: "+strings.Join(ids, ", "), "model")

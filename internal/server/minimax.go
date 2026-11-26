@@ -116,7 +116,7 @@ func (s *Server) handleCreateMiniMax(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": "", "base_resp": miniMaxCode(err)})
 		return
 	}
-	plan, err := translate.Create(arkBody, nil, miniMaxSlot)
+	plan, err := translate.Create(arkBody, nil, miniMaxSlot, s.cfg.FreeOnly)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": "", "base_resp": miniMaxCode(err)})
 		return
@@ -140,6 +140,7 @@ func (s *Server) handleCreateMiniMax(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task_id": "", "base_resp": miniMaxCode(err)})
 		return
 	}
+	s.noteFreeOnlyAdjusted(plan, entry.ID)
 	if s.cfg.SubmitInline {
 		s.submit(entry, plan)
 	} else {

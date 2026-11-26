@@ -41,6 +41,44 @@
 
 ## 计费红线
 
+### 默认策略：只提供不扣费的模型（`free_only`，默认 `true`）
+
+这个微服务的默认契约是**不可能产生账单**：请求在翻译之前就被改写到四档免费组合上
+（`480p@5s` / `480p@10s` / `720p@5s` / `720p@8s`），调用方不会收到 400。
+
+| 调用方传了 | 实际发出 | 是否告知调用方 |
+|---|---|---|
+| `extra_body.aivideomaker_channel=official` | 丢弃 ⇒ 网页会话 | 否（`effective.channel` 不出现） |
+| `extra_body.aivideomaker_tier=base` | 丢弃 ⇒ `turbo` | 否 |
+| `resolution=1080p` / 其它未知档 | `720p`（往上没有免费档，只能下到最高免费档） | 否 |
+| `duration` 不在免费枚举内（含 `frames` 换算后越界） | **向上吸附**到该分辨率最近的免费档 | 否 |
+
+吸附是**往上**的，宁可长一点，也不把 6s 悄悄剪成 5s：
+
+| 请求 | 实际 |
+|---|---|
+| `720p` / 4s / 6s / 7s | `720p` / 5s / 8s / 8s |
+| `480p` / 4s / 6s / 8s | `480p` / 5s / 10s / 10s |
+| `720p` / 9s 及以上 | `720p` / 8s（该分辨率免费上界） |
+| `480p` / 11s 及以上 | `480p` / 10s |
+| `1080p` / 6s | `720p` / 8s |
+
+三处**不**走静默改写，因为它们不是"参数有隐患"，而是"本服务不提供"：
+
+- **官方独有模型**（`t2v` / `i2v` / `t2v_v3` / `i2v_v3` / `wan30` / `seedance20` / `HappyHorse`）
+  ⇒ 400（`free-only deployment: model ... has no free window`）；`GET /v1/models` 也不再列出它们。
+- **`/official/api/...` 的创建路由** ⇒ 400（该端点存在的意义就是花钱；查询仍放行）。
+
+被改写的每一项都会留痕，**静默只对调用方，不对运维**：
+
+- 任务记录 `warnings` 里一条 `free-only policy: adjusted ...`，`requested` 仍是调用方原值；
+- 服务日志 `marker=free_only_adjusted`（带任务号、模型与 `原名→实际值`，如 `duration=6s→8s`）；
+- `GET /healthz` 的 `free_only` 字段。
+
+要恢复"网页 + 官方"双通路：`free_only=false` 或 `AVM2_FREE_ONLY=0`。**只有这一种状态会花钱。**
+
+### 价格表（`free_only=false` 时才可能命中）
+
 | 情形 | 是否计费 | 实测单价（积分/秒） |
 |---|---|---|
 | `480p` @ 5s / 10s，或 `720p` @ 5s / 8s（`tier=turbo`） | ❌ **免费** | 0 |
@@ -61,6 +99,24 @@
 
 `effective` 里除了 `billed` 还给了 `estimated_credits`（按上表算出的**钱数**）；只有
 实测过的组合才给值，未实测的组合是 `null` —— 不外推，因为调用方会拿它做预算。
+
+### 免费档被扣费的探针（`free_line_billed`）
+
+`free_only` 下每条任务都应当是免费的。**如果上游对一条"应当免费"的任务回了 `paid=true`**，
+说明两件事之一发生了，而这两种情况事先都没有任何信号：
+
+1. 该账号 / 该设备的当日免费额度用尽，站点从"429 `MINIMAX_H3_FREE_DAILY_LIMIT`"
+   改成了**静默扣费**（我们照常拿到 taskId，只是账单不为 0）；
+2. 站点收窄了免费窗口（分辨率 / 时长 / tier 的口径变了）。
+
+判定用的是两条事实的交集：`effective.billed=false`（我们算它免费）**且** `usage.paid=true`
+（上游确实收了钱）。命中时：
+
+- 服务日志：`marker=free_line_billed`，带账号、分辨率、时长、tier、上游任务号；
+- Prometheus：`aivm_free_line_billed_total`（**非零即异常**，比 `aivm_tasks_charged` 更早暴露口径失准）。
+
+反向情况（`effective.billed=true` 且 `paid=true`，即调用方主动选了付费档）不刷这条日志 ——
+那是预期内的花费，不是异动。
 
 > 实测（2026-11-08，真实账号，每例前后各读一次余额核对）：
 >

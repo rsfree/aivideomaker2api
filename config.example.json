@@ -8,6 +8,8 @@
   "media_path": "/v",
   "_comment_media_passthrough": "true = 对外 video_url 直接给**上游地址**（本服务不中转成片带宽）；/v/ 端点仍保留，历史链接不失效。false = 改写成本服务地址。",
   "media_passthrough": false,
+  "_comment_free_only": "true = 只提供不扣费的模型：official 通道 / base 档在翻译前丢弃，分辨率/时长静默吸附到四档免费组合（480p@5s/10s、720p@5s/8s；6s→8s，往上吸），官方独有模型与 /official/ 创建路由直接 400。这是默认值 —— 这个开关只有一种状态会让别人花钱，要花必须显式改成 false（或 AVM2_FREE_ONLY=0）。",
+  "free_only": true,
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "task_store": {

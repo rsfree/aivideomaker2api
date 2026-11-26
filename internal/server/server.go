@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rsfree/aivideomaker2api/internal/apierr"
 	"github.com/rsfree/aivideomaker2api/internal/debughist"
 	"github.com/rsfree/aivideomaker2api/internal/jsonx"
 	"github.com/rsfree/aivideomaker2api/internal/media"
@@ -58,6 +59,12 @@ type Config struct {
 	MediaRehostBudget time.Duration
 	// RehostWorkers 是转存并发上限（一次创建最多 7 个媒体项，互为独立）。
 	RehostWorkers int
+	// FreeOnly 是本微服务的**计费策略**：只提供不扣费的模型。
+	//
+	// 开启后：付费开关（official 通道 / base 档）在翻译前丢弃，分辨率与时长**向上吸附**
+	// 到四档免费组合；官方独有模型与 /official/ 创建路由直接拒绝。
+	// 关掉才恢复"网页 + 官方双通路"，此时调用方才可能真的花钱。
+	FreeOnly bool
 	// Official 是官方 REST API（`/api/v1/*`）的配置。APIKey 非空即启用。
 	//
 	// 两条通路的分工：官方 key 没有 cookie、没有 Turnstile 闸门，还多出
@@ -115,6 +122,9 @@ type Server struct {
 	flights sync.Map // id -> *viewFlight
 	// upstreamGets 是**真正打到上游**的任务查询次数（单测与 /metrics 都靠它证明折叠生效）。
 	upstreamGets atomic.Int64
+	// freeLineBilled 数"预测免费却被扣费"的任务（计费红线探针，见 noteFreeLineBilled）。
+	// 绝对值不重要，**非零就是异常** —— 这是免费档口径失效的唯一早期信号。
+	freeLineBilled atomic.Int64
 
 	// official 非空表示官方通路可用（配置了 key）。
 	official *official.Client
@@ -176,7 +186,11 @@ func New(cfg Config, p *pool.Pool, st *store.Store, proxy *media.Proxy, logger *
 			s.log.Error("官方 API 配置无效，已忽略（继续用网页会话）", "err", err)
 		} else {
 			s.official = oc
-			s.log.Info("官方 API 通路已启用（无闸门；优先于网页会话）")
+			if cfg.FreeOnly {
+				s.log.Info("free-only 模式：官方通路仅保留查询能力 —— 创建一律走网页免费档")
+			} else {
+				s.log.Info("官方 API 通路已启用（无闸门；优先于网页会话）")
+			}
 		}
 	}
 	s.routes()
@@ -481,8 +495,19 @@ func randomHex(n int) string {
 type channelCtxKey struct{}
 
 // forceChannel 把一个 handler 包成"强制某条上游通路"。
+//
+// free-only 下 `/official/` 的**创建**被拒：这不是"参数有隐患"（那类一律静默吸附），
+// 而是端点的存在意义就是花钱 —— 静默改写会让调用方以为自己在用官方线，账单口径与
+// URL 对不上。查询仍放行：查历史任务不产生费用。
 func (s *Server) forceChannel(channel string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.FreeOnly && channel == "official" && r.Method != http.MethodGet {
+			s.writeError(w, r, apierr.Param(
+				"free-only deployment: the official REST line (which bills every generation) is disabled. "+
+					"Use the default web line (480p @ 5s/10s or 720p @ 5s/8s, tier=turbo) — billing-risk "+
+					"parameters are snapped into that window automatically.", ""))
+			return
+		}
 		h(w, r.WithContext(context.WithValue(r.Context(), channelCtxKey{}, channel)))
 	}
 }

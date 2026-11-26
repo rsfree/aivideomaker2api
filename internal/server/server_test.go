@@ -35,6 +35,9 @@ type fakeSite struct {
 	// 用来验证"运行期失败 → 自动重提一次 → 第二次成功"这条链路。
 	taskStatuses []string
 	taskGets     int32
+	// lastCreate 记录最近一次 create 的请求体原文。
+	// free-only 的断言必须看**真正发出去**的参数，而不是我们自己的 effective（后者可能是假的）。
+	lastCreate atomic.Value // string
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -64,6 +67,9 @@ func newFakeSite(t *testing.T) *fakeSite {
 	})
 	mux.HandleFunc("/api/ai.minimaxH3", func(w http.ResponseWriter, r *http.Request) {
 		fs.createHits++
+		if raw, err := io.ReadAll(r.Body); err == nil {
+			fs.lastCreate.Store(string(raw))
+		}
 		if fs.createFail != nil {
 			fs.createFail(w)
 			return

@@ -127,7 +127,7 @@ func printDryRun(prompt string) {
 		"duration":   5,
 		"ratio":      "16:9",
 	}
-	plan, err := translate.Create(body, nil, "")
+	plan, err := translate.Create(body, nil, "", false)
 	if err != nil {
 		fail(err)
 	}

@@ -36,6 +36,10 @@ services:
       AVM2_API_KEY: ${AVM2_API_KEY:?set in .env}
       AVM2_PANEL_PASSWORD: ${AVM2_PANEL_PASSWORD:?set in .env}
       AVM2_MEDIA_PASSTHROUGH: ${AVM2_MEDIA_PASSTHROUGH:-0}
+      # 计费策略：1（默认）= 只跑免费档，分辨率/时长静默吸附到四档免费组合（6s→8s），
+      # 官方独有模型不可用。
+      # 只有设 0 才会恢复"调用方点名 official 就真的扣积分"的旧行为。
+      AVM2_FREE_ONLY: ${AVM2_FREE_ONLY:-1}
       # 对外可访问的本服务地址：填了才会把成片直链换成本服务地址（passthrough 下无用）。
       AVM2_PUBLIC_BASE: ${AVM2_PUBLIC_BASE:-}
       # 官方 REST API（/api/v1/*）的 key：留空则只跑网页会话。

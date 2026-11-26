@@ -398,6 +398,11 @@ type Plan struct {
 	Incompatible []string       `json:"incompatible"`
 	WebParams    map[string]any `json:"web_params"`
 	CaptchaToken string         `json:"captcha_token"`
+	// FreeOnlyAdjusted 是 free-only 策略**改写**过的参数（形如 `duration=6s→8s`）。
+	//
+	// 静默是对调用方的：请求照常受理、照常出片，只是吸附到免费档；
+	// 运维侧必须还能看到"哪个字段被改了、原值是什么" —— 面板与日志都要用到它。
+	FreeOnlyAdjusted []string `json:"free_only_adjusted,omitempty"`
 }
 
 // Procedure 是本次要调的站点 tRPC procedure（站点把模型编在路径上）。
@@ -409,7 +414,11 @@ func (p *Plan) Procedure() string {
 //
 // forceSlot 是**面级策略**入口 —— "这个面只跑某一个上游槽位"，由面的代码传入
 // （当前只有 /v1/videos 用它"只跑免费线"）。它**不改写 requested.model**。
-func Create(body map[string]any, channelOptions map[string]any, forceSlot string) (*Plan, error) {
+//
+// freeOnly 是**部署级策略**：本微服务只提供不扣费的模型。开启时先丢掉付费开关、
+// 把分辨率/时长**向上吸附**到四档免费组合（见 SanitizeFree），再走下面的翻译 ——
+// 也就是说，后面任何一条路径看到的请求都已经在免费窗口内，官方通道在这里是不可达的。
+func Create(body map[string]any, channelOptions map[string]any, forceSlot string, freeOnly bool) (*Plan, error) {
 	if body == nil {
 		return nil, paramErr("body must be a JSON object", "")
 	}
@@ -418,6 +427,19 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 	warnings := []string{}
 	unsupported := []string{}
 	incompatible := []string{}
+
+	// free-only：在任何校验之前把付费开关抹掉、把档位/时长**向上吸附**到免费档。
+	// 顺序是关键 —— 若放到解析之后，"1080p 不是合法枚举"会先命中 400，
+	// 而这条策略要的正是**不报错**。
+	// original 留着给 requested 区块：证据必须是调用方写的原值，不是我们改后的值。
+	original := body
+	var freeAdjusted []string
+	if freeOnly {
+		body, freeAdjusted = SanitizeFree(body)
+		if len(freeAdjusted) > 0 {
+			warnings = append(warnings, "free-only policy: adjusted "+strings.Join(freeAdjusted, ", "))
+		}
+	}
 
 	// `model` 决定**上游槽位**（= 站点 procedure 名里那一段）。站点创建体里**没有**
 	// model 字段 ⇒ "落到哪个模型"在这里表现为**换 procedure**。改模型 = 换计费档位，
@@ -453,6 +475,13 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 		// 网页槽位不认这个名字 —— 如果官方支持，就落官方（t2v / wan30 / happyhorse …）。
 		// 这类模型网页端**根本没有**，报"unknown model"对调用方毫无帮助。
 		if m, ok := official.Lookup(model); ok {
+			// free-only：官方独有模型没有任何免费档 —— 丢参数变不出免费路径，
+			// 只能明说"本服务不提供"。这是模型可用性问题，不是参数有隐患。
+			if freeOnly {
+				return nil, paramErr(fmt.Sprintf(
+					"free-only deployment: model %q has no free window, so this service does not offer it. "+
+						"Available free combinations — %s", model, enumSummary()), "model")
+			}
 			items := jsonx.Slice(body["content"])
 			if len(items) == 0 {
 				return nil, paramErr("content is required", "content")
@@ -737,13 +766,15 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 		}
 	}
 
+	// 证据区块读 **original**：free-only 会改写 body，但"调用方写了什么"不能跟着变
+	// （否则事后无法解释"为什么 1080p 的请求出的是 720p 的片"）。
 	requested := map[string]any{
 		"model":                    model,
 		"content":                  items,
 		"ratio":                    nullable(ratioRaw),
-		"resolution":               body["resolution"],
-		"duration":                 body["duration"],
-		"frames":                   body["frames"],
+		"resolution":               original["resolution"],
+		"duration":                 original["duration"],
+		"frames":                   original["frames"],
 		"output_format":            outputFormat,
 		"generate_audio":           generateAudio,
 		"omni_reference_task_type": nullableString(omni),
@@ -799,13 +830,14 @@ func Create(body map[string]any, channelOptions map[string]any, forceSlot string
 	}
 
 	return &Plan{
-		Requested:    requested,
-		Effective:    effective,
-		Warnings:     warnings,
-		Unsupported:  unsupported,
-		Incompatible: incompatible,
-		WebParams:    webParams,
-		CaptchaToken: captcha,
+		Requested:        requested,
+		Effective:        effective,
+		Warnings:         warnings,
+		Unsupported:      unsupported,
+		Incompatible:     incompatible,
+		WebParams:        webParams,
+		CaptchaToken:     captcha,
+		FreeOnlyAdjusted: freeAdjusted,
 	}, nil
 }
 

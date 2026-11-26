@@ -19,7 +19,7 @@ func TestCreateMinimalPlan(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["duration"] = 5
 	body["resolution"] = "480p"
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestCreateMinimalPlan(t *testing.T) {
 
 // 回归：WebParams 里的两个数组字段必须能序列化成 []，不能是 null。
 func TestWebParamsArraysAreNeverNull(t *testing.T) {
-	plan, err := Create(textBody("minimaxH3"), nil, "")
+	plan, err := Create(textBody("minimaxH3"), nil, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,12 +93,12 @@ func TestPreferFreeNoLongerSnaps(t *testing.T) {
 	body["resolution"] = "480p"
 	body["duration"] = 15
 	body["extra_body"] = map[string]any{"aivideomaker_prefer_free": true}
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("prefer_free must not turn 480p/15s into a valid request")
 	}
 
 	body["duration"] = 5
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Fatalf("480p/5s must pass: %v", err)
 	}
@@ -111,20 +111,20 @@ func TestCreateRejectsUnsupportedDuration(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["resolution"] = "480p"
 	body["duration"] = 8
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("480p/8s must be rejected at the edge (allowed: 5s / 10s)")
 	}
 	body["duration"] = 10
-	if _, err := Create(body, nil, ""); err != nil {
+	if _, err := Create(body, nil, "", false); err != nil {
 		t.Fatalf("480p/10s must be accepted: %v", err)
 	}
 	body["resolution"] = "720p"
 	body["duration"] = 10
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("720p/10s must be rejected (allowed: 5s / 8s)")
 	}
 	body["duration"] = 8
-	if _, err := Create(body, nil, ""); err != nil {
+	if _, err := Create(body, nil, "", false); err != nil {
 		t.Fatalf("720p/8s must be accepted: %v", err)
 	}
 }
@@ -135,7 +135,7 @@ func TestCreateRejectsNonFreeResolution(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["resolution"] = "1080p"
 	body["duration"] = 5
-	_, err := Create(body, nil, "")
+	_, err := Create(body, nil, "", false)
 	if err == nil {
 		t.Fatal("the web line must reject 1080p (free tier is 480p/720p only)")
 	}
@@ -148,7 +148,7 @@ func TestBaseTierIsAlwaysBilledWithoutShouting(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["duration"] = 5
 	body["extra_body"] = map[string]any{"aivideomaker_tier": "base"}
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,12 +165,12 @@ func TestBaseTierIsAlwaysBilledWithoutShouting(t *testing.T) {
 func TestCreateRejectsUnknownRatioButSnapsKnown(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["ratio"] = "banana"
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("unknown ratio must be rejected on the Ark line")
 	}
 
 	body["ratio"] = "5:4"
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Fatalf("5:4 is a readable proportion and must not be rejected: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestFrameAndReferenceAreMutuallyExclusive(t *testing.T) {
 			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://a/2.png"}},
 		},
 	}
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("frame inputs and reference assets must not be mixed")
 	}
 }
@@ -202,7 +202,7 @@ func TestReferenceTruncationLeavesATrace(t *testing.T) {
 		items = append(items, map[string]any{
 			"type": "image_url", "image_url": map[string]any{"url": "https://x/" + itoa(i) + ".png"}})
 	}
-	plan, err := Create(map[string]any{"model": "minimaxH3", "content": items}, nil, "")
+	plan, err := Create(map[string]any{"model": "minimaxH3", "content": items}, nil, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestReferenceTruncationLeavesATrace(t *testing.T) {
 func TestOmniEditIsIncompatibleNotSilentlyDropped(t *testing.T) {
 	body := textBody("seedance25")
 	body["omni_reference_task_type"] = "edit"
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -233,11 +233,11 @@ func TestOmniEditIsIncompatibleNotSilentlyDropped(t *testing.T) {
 func TestGenerateAudioMustBeBoolean(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["generate_audio"] = "yes"
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("non-boolean generate_audio must be rejected rather than guessed")
 	}
 	body["generate_audio"] = true
-	if _, err := Create(body, nil, ""); err != nil {
+	if _, err := Create(body, nil, "", false); err != nil {
 		t.Fatalf("boolean generate_audio must be accepted: %v", err)
 	}
 }
@@ -245,7 +245,7 @@ func TestGenerateAudioMustBeBoolean(t *testing.T) {
 func TestOutputFormatWarnsWhenUpstreamCannotHonor(t *testing.T) {
 	body := textBody("minimaxH3")
 	body["output_format"] = "mov"
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestForceSlotOverridesChannelMapAndLeavesATrace(t *testing.T) {
 	options := map[string]any{"model_map": map[string]any{
 		"doubao-seedance-2-5-260628": "seedance25",
 	}}
-	plan, err := Create(body, options, "minimaxH3")
+	plan, err := Create(body, options, "minimaxH3", false)
 	if err != nil {
 		t.Fatalf("force_slot must not reject an unknown name: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestBillingViewFreeTierIsActuallyFree(t *testing.T) {
 			"resolution": c.res,
 			"duration":   c.dur,
 		}
-		plan, err := Create(body, nil, "")
+		plan, err := Create(body, nil, "", false)
 		if err != nil {
 			t.Fatalf("Create(%s/%ds): %v", c.res, c.dur, err)
 		}
@@ -496,7 +496,7 @@ func TestOfficialModelsTranslatePerModelRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(c.body), &body); err != nil {
 			t.Fatalf("%s: bad json: %v", c.name, err)
 		}
-		plan, err := Create(body, nil, "")
+		plan, err := Create(body, nil, "", false)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -529,7 +529,7 @@ func TestOfficialModelsTranslatePerModelRules(t *testing.T) {
 	// i2v 必须给首帧图，缺了要明确报错（不是静默提交）
 	var body map[string]any
 	_ = json.Unmarshal([]byte(`{"model":"i2v","content":[{"type":"text","text":"a fox"}],"duration":5}`), &body)
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Error("i2v without an image must fail")
 	}
 }
@@ -545,7 +545,7 @@ func TestBilledIsModelAware(t *testing.T) {
 		t.Fatal("bad json")
 	}
 	// seedance20 是网页槽位，但**没有免费档**
-	plan, err := Create(body, nil, "")
+	plan, err := Create(body, nil, "", false)
 	if err != nil {
 		t.Skipf("seedance20 rejected on the web path: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestBilledIsModelAware(t *testing.T) {
 	var mm map[string]any
 	_ = json.Unmarshal([]byte(`{"model":"minimaxH3","content":[{"type":"text","text":"a fox"}],`+
 		`"resolution":"480p","duration":5}`), &mm)
-	plan2, err := Create(mm, nil, "")
+	plan2, err := Create(mm, nil, "", false)
 	if err != nil {
 		t.Fatalf("minimaxH3: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestModelAliasesStayInsideTheEnum(t *testing.T) {
 
 // 别名命中后参数被钉死，且回显仍是调用方原名。
 func TestModelAliasPinsParameters(t *testing.T) {
-	plan, err := Create(textBody("minimax-h3-480p-10s"), nil, "")
+	plan, err := Create(textBody("minimax-h3-480p-10s"), nil, "", false)
 	if err != nil {
 		t.Fatalf("alias must resolve: %v", err)
 	}
@@ -628,13 +628,13 @@ func TestModelAliasPinsParameters(t *testing.T) {
 func TestModelAliasRejectsConflictingBody(t *testing.T) {
 	body := textBody("minimax-h3-480p-5s")
 	body["duration"] = 10
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("conflicting duration must be rejected, not silently overridden")
 	}
 
 	body = textBody("minimax-h3-720p-8s")
 	body["resolution"] = "480p"
-	if _, err := Create(body, nil, ""); err == nil {
+	if _, err := Create(body, nil, "", false); err == nil {
 		t.Fatal("conflicting resolution must be rejected")
 	}
 
@@ -642,7 +642,7 @@ func TestModelAliasRejectsConflictingBody(t *testing.T) {
 	body = textBody("minimax-h3-720p-8s")
 	body["resolution"] = "720p"
 	body["duration"] = 8
-	if _, err := Create(body, nil, ""); err != nil {
+	if _, err := Create(body, nil, "", false); err != nil {
 		t.Fatalf("matching explicit values must pass: %v", err)
 	}
 }
@@ -664,7 +664,7 @@ func TestBareSlotAliasKeepsBodyParams(t *testing.T) {
 				"content":    []any{map[string]any{"type": "text", "text": "a cat"}},
 				"resolution": resolution,
 				"duration":   duration,
-			}, nil, "")
+			}, nil, "", false)
 			if err != nil {
 				t.Fatalf("%s/%ds: %v", resolution, duration, err)
 			}
@@ -686,7 +686,7 @@ func TestBareSlotAliasKeepsBodyParams(t *testing.T) {
 		"content":    []any{map[string]any{"type": "text", "text": "a cat"}},
 		"resolution": "1080p",
 		"duration":   5,
-	}, nil, ""); err == nil {
+	}, nil, "", false); err == nil {
 		t.Error("minimax-h3 must still reject 1080p")
 	}
 }

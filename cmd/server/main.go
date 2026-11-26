@@ -172,7 +172,13 @@ func main() {
 			ProbeInterval:   cfg.Pool.ProbeInterval.Get(),
 			MinterEndpoints: upstream.CountMinterEndpoints(cfg.Minter.URL),
 			OfficialEnabled: cfg.Official.Enabled(), OfficialAccount: officialAccount,
-			PlanRequest: server.PlanDebug,
+			// 与公网创建同一条策略链：调试页看到的就是真实提交会发生的事。
+			PlanRequest: func(body map[string]any) (map[string]any, error) {
+				if srv == nil {
+					return nil, fmt.Errorf("server not ready")
+				}
+				return srv.PlanDebug(body)
+			},
 			// 调试历史落在任务库旁边（同一个 data 目录，一起备份）。
 			DebugHistory: history,
 			SubmitRequest: func(ctx context.Context, body map[string]any) (map[string]any, error) {
@@ -192,6 +198,7 @@ func main() {
 		APIKey:             cfg.APIKey,
 		TaskCacheTTL:       cfg.TaskStore.CacheTTL.Get(),
 		SubmitWorkers:      cfg.Submit.Workers,
+		FreeOnly:           cfg.FreeOnly,
 		SubmitInline:       cfg.Submit.Inline,
 		SubmitLease:        cfg.Submit.Lease.Get(),
 		MediaRehostBudget:  cfg.Upstream.MediaRehostBudget.Get(),
